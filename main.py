@@ -2,7 +2,7 @@ import argparse
 from kn_util.utils.io import load_csv
 import os
 import os.path as osp
-from .downloader import VideoDownloader
+from downloader import VideoDownloader
 
 
 def add_args(parser):
