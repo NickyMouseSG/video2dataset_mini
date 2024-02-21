@@ -1,3 +1,7 @@
+# To-Do
+
+- [ ] Support pyarrow table for sharding meta (.csv does not support too many urls)
+
 # Install kn_util
 
 ```bash
@@ -7,7 +11,7 @@ pip install git+https://github.com/K-Nick/kn-toolkit
 # Usage example
 
 ```bash
-python main.py --input_file url.tsv --verbose
+kv2d --input_file url_mini.tsv --num_processes 16 --num_threads 32 --verbose
 ```
 
 ![alt text](assets/image.png)
