@@ -1,2 +1,0 @@
-[console_scripts]
-kn_v2d = kn_v2d.main:main

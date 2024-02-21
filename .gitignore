@@ -1,3 +1,4 @@
 videos
 .vscode
 **/__pycache__
+**/*.egg-info
