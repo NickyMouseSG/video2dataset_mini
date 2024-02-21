@@ -11,5 +11,5 @@ setup(
     author="NickyMouse",
     author_email="jing005@e.ntu.edu.sg",
     packages=["kv2d"],
-    entry_points={"console_scripts": ["kv2d = kn_v2d.main:main"]},
+    entry_points={"console_scripts": ["kv2d = kv2d.main:main"]},
 )
