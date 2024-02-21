@@ -21,14 +21,25 @@ def add_args(parser):
         default=3,
         help="Maximum number of retries for failed downloads",
     )
+    parser.add_argument("--shard_size", type=int, default=1000, help="Number of videos to download in each shard")
     parser.add_argument("--semaphore_limit", type=int, default=32, help="Maximum number of downloads accumulating in thread")
+    parser.add_argument("--log_file", type=str, default="video_downloader.log", help="Log file")
     parser.add_argument("--verbose", action="store_true", help="Print verbose logs")
 
 
 def main():
+    from kn_util.utils.logger import setup_logger_loguru
+
     parser = argparse.ArgumentParser()
     add_args(parser)
     args = parser.parse_known_args()[0]
+
+    setup_logger_loguru(
+        filename=args.log_file,
+        include_filepath=False,
+        include_function=False,
+        stdout=False,
+    )
 
     input_metas = load_csv(args.input_file, delimiter="\t", has_header=True)
     assert "url" in input_metas[0], "Input meta data must contain 'url' field for downloading"
@@ -45,6 +56,7 @@ def main():
         num_processes=args.num_processes,
         num_threads=args.num_threads,
         semaphore_limit=args.semaphore_limit,
+        shard_size=args.shard_size,
         max_retries=args.max_retries,
         verbose=args.verbose,
     )
