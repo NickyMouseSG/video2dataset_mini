@@ -1,6 +1,6 @@
 # To-Do
 
-- [ ] Support pyarrow table for sharding meta (.csv does not support too many urls)
+- [*] Support feather table for sharding meta (.csv does not support too many urls)
 
 # Install kn_util
 

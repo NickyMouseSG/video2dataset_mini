@@ -3,6 +3,7 @@ from kn_util.utils.io import load_csv
 import os
 import os.path as osp
 from .downloader import VideoDownloader
+from .sharder import Sharder
 
 
 def add_args(parser):
@@ -41,29 +42,29 @@ def main():
         stdout=False,
     )
 
-    input_metas = load_csv(args.input_file, delimiter="\t", has_header=True)
-    assert "url" in input_metas[0], "Input meta data must contain 'url' field for downloading"
-    assert "vid" in input_metas[0], "Input meta data must contain 'vid' field for naming"
-
     os.makedirs(osp.join(args.output_dir, ".meta"), exist_ok=True)
-
-    urls = []
-    for row in input_metas:
-        url = row.pop("url")
-        urls.append(url)
 
     video_downloader = VideoDownloader(
         num_processes=args.num_processes,
         num_threads=args.num_threads,
         semaphore_limit=args.semaphore_limit,
-        shard_size=args.shard_size,
         max_retries=args.max_retries,
         verbose=args.verbose,
     )
 
+    sharder = Sharder(
+        input_file=args.input_file,
+        read_kwargs={
+            "headers": True,
+            "url_col": "url",
+            "vid_col": "vid",
+        },
+        shard_size=args.shard_size,
+        shard_dir=osp.join(args.output_dir, ".shards"),
+    )
+
     video_downloader.download(
-        urls,
-        input_metas,
+        sharder=sharder,
         output_dir=args.output_dir,
     )
 

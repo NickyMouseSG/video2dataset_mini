@@ -34,6 +34,7 @@ def download_single(url, meta, path, semaphore, retry_cnt):
 
 def download_shard(
     url_shard,
+    vid_shard,
     meta_shard,
     output_dir,
     shard_id,
@@ -42,7 +43,6 @@ def download_shard(
     max_retries=3,
     semaphore_limit=32,
 ):
-
     executor = ThreadPoolExecutor(num_threads)
     semaphore = Semaphore(semaphore_limit)
     failed = 0
@@ -56,10 +56,14 @@ def download_shard(
         download_meta_list = load_csv(download_meta, delimiter="\t", has_header=False)
         downloaded_vid = [_[1] for _ in download_meta_list]
 
+    if len(downloaded_vid) > 0:
+        logger.info(f"Shard {shard_id} resume from {len(downloaded_vid)} videos")
+
     not_done = []
     num_downloaded = 0
-    for url, meta in zip(url_shard, meta_shard):
-        if meta["vid"] in downloaded_vid:
+
+    for url, vid, meta in zip(url_shard, vid_shard, meta_shard):
+        if vid in downloaded_vid:
             num_downloaded += 1
             continue
         not_done.append(
@@ -67,7 +71,7 @@ def download_shard(
                 download_single,
                 url=url,
                 meta=meta,
-                path=osp.join(output_dir, meta["vid"] + ".mp4"),
+                path=osp.join(output_dir, vid + ".mp4"),
                 retry_cnt=0,
                 semaphore=semaphore,
             )
@@ -79,13 +83,13 @@ def download_shard(
         done, not_done = wait(not_done, return_when=FIRST_COMPLETED, timeout=30.0)
 
         success_metas = []
+        failed_metas = []
         finish_cnt = 0
         for future in done:
             url, meta, path, errorcode, retry_cnt, error = future.result()
             if errorcode == 0:
-                success_metas += [(url, meta)]
+                success_metas += [(url, meta, "success")]
                 finish_cnt += 1
-                download_meta_fp.write(f"{url}\t{meta['vid']}\n")
             else:
                 is_unavail = "Video unavailable" in error[0]
                 is_private = "Private video" in error[0]
@@ -104,15 +108,16 @@ def download_shard(
                         semaphore=semaphore,
                     )
                 else:
+                    failed_metas += [(url, meta, error[0].strip())]
                     failed += 1
                     finish_cnt += 1
 
         progress_dict[shard_id] += finish_cnt
 
-        for url, meta in success_metas:
-            download_meta_fp.write(f"{url}\t{meta['vid']}\n")
-
-        download_meta_fp.flush()
+        if len(success_metas) + len(failed_metas) > 0:
+            meta_str = "\n".join([f"{_[0]}\t{_[1]}\t{_[2]}" for _ in success_metas] + [f"{_[0]}\t{_[1]}\t{_[2]}" for _ in failed_metas])
+            download_meta_fp.write(meta_str + "\n")
+            download_meta_fp.flush()
 
     download_meta_fp.close()
     executor.shutdown(wait=True)
@@ -125,7 +130,6 @@ class VideoDownloader:
         self,
         num_processes=16,
         verbose=False,
-        shard_size=1000,
         num_threads=32,
         max_retries=3,
         semaphore_limit=128,
@@ -135,7 +139,6 @@ class VideoDownloader:
         self.num_threads = num_threads
         self.max_retries = max_retries
         self.semaphore_limit = semaphore_limit
-        self.shard_size = shard_size
 
         self.manager = mp.Manager()
         self._progress = self.manager.dict()
@@ -145,45 +148,42 @@ class VideoDownloader:
 
     def download(
         self,
-        urls,
-        metas,
+        sharder,
         output_dir,
     ):
         num_processes = self.num_processes
         verbose = self.verbose
-
-        # shard_size = (len(urls) + num_processes - 1) // num_processes
-        shard_size = self.shard_size
-        ranges = [(i, min(i + shard_size, len(urls))) for i in range(0, len(urls), shard_size)]
-        assert len(ranges) >= num_processes, "Shard size is too small, consider increasing shard size or decreasing num_processes"
-
-        url_shards = [urls[start:end] for start, end in ranges]
-        meta_shards = [metas[start:end] for start, end in ranges]
+        num_shards = len(sharder)
 
         progress = get_rich_progress_mofn(
             disable=not verbose,
             refresh_per_second=1,
         )
         progress.start()
-        progress.add_task("Total", total=len(urls))
-
-        # self.download_shard(url_shards[0], meta_shards[0], output_dir, 0)
-        # import ipdb; ipdb.set_trace()
+        progress.add_task("Total", total=sharder.row_count)
 
         executor = ProcessPoolExecutor(num_processes)
-
-        gen = iter(enumerate(zip(url_shards, meta_shards)))
+        shard_cnt = 0
 
         not_done = []
-        for _ in range(num_processes):
-            shard_id, (url_shard, meta_shard) = next(gen)
-            progress.add_task(f"Shard {shard_id}", total=ranges[shard_id][1] - ranges[shard_id][0])
+        shards = sharder.fetch_shards(list(range(num_processes)))
+        shard_cnt += num_processes
+
+        for shard_id in range(num_processes):
+            (
+                url_shard,
+                vid_shard,
+                meta_shard,
+            ) = shards[shard_id]
+            progress.add_task(f"Shard {shard_id}", total=len(url_shard))
             self._progress[shard_id] = 0
+
             # https://stackoverflow.com/questions/17419879/why-i-cannot-use-python-module-concurrent-futures-in-class-method
             # here self.download_shard is not working as expected
             future = executor.submit(
                 download_shard,
                 url_shard=url_shard,
+                vid_shard=vid_shard,
                 meta_shard=meta_shard,
                 output_dir=output_dir,
                 shard_id=shard_id,
@@ -191,48 +191,66 @@ class VideoDownloader:
             )
             not_done.append(future)
 
-        finished_downloaded = 0
+        total_finished = 0
+        total_downloaded = 0
+        history_finished = 0
 
         # polling for latest progress
         while len(not_done) != 0:
-            ongoing_downloaded = 0
+            ongoing_finished = 0
 
             done, not_done = wait(not_done, return_when=FIRST_COMPLETED, timeout=5.0)
-            for shard_id in self._progress.keys():
-                cur_progress = self._progress[shard_id]
-                ongoing_downloaded += cur_progress
-                progress.update(shard_id + 1, completed=cur_progress)
 
+            # deal with finished shards
             for future in done:
                 shard_id, failed, total = future.result()
                 logger.info(f"Shard {shard_id} downloaded {total - failed}/{total} videos")
                 progress.remove_task(shard_id + 1)
                 self._progress.pop(shard_id)
-                finished_downloaded += total
+                history_finished += total
+                total_downloaded += total - failed
 
-            total_progress = finished_downloaded + ongoing_downloaded
+            # check ongoing shards
+            for shard_id in self._progress.keys():
+                cur_progress = self._progress[shard_id]
+                ongoing_finished += cur_progress
+                progress.update(shard_id + 1, completed=cur_progress)
 
-            progress.update(0, completed=total_progress)
+            total_finished = history_finished + ongoing_finished
+
+            progress.update(0, completed=total_finished)
             progress.refresh()
 
-            for _ in range(len(done)):
-                try:
-                    shard_id, (url_shard, meta_shard) = next(gen)
-                    progress.add_task(f"Shard {shard_id}", total=len(url_shard))
-                    self._progress[shard_id] = 0
-                    future = executor.submit(
-                        download_shard,
-                        url_shard=url_shard,
-                        meta_shard=meta_shard,
-                        output_dir=output_dir,
-                        shard_id=shard_id,
-                        progress_dict=self._progress,
-                    )
-                    not_done.add(future)
-                except StopIteration:
-                    break
+            num_shard_to_submit = min(len(done), num_shards - shard_cnt)
+            shard_ids = list(range(shard_cnt, shard_cnt + num_shard_to_submit))
+            shards = sharder.fetch_shards(shard_ids)
+            shard_cnt += num_shard_to_submit
 
-        logger.info(f"Total downloaded {total_downloaded}/{len(urls)} videos")
+            # submit new shards if there are any
+            for shard_id, shard in zip(shard_ids, shards):
+                url_shard, vid_shard, meta_shard = shard
+                progress.add_task(f"Shard {shard_id}", total=len(url_shard))
+                self._progress[shard_id] = 0
+                future = executor.submit(
+                    download_shard,
+                    url_shard=url_shard,
+                    vid_shard=vid_shard,
+                    meta_shard=meta_shard,
+                    output_dir=output_dir,
+                    shard_id=shard_id,
+                    progress_dict=self._progress,
+                )
+                not_done.add(future)
+
+        logger.info(
+            "\n".join(
+                [
+                    f"Total downloaded {total_downloaded}",
+                    f"Total finished {total_finished}",
+                    f"{sharder.row_count} videos",
+                ]
+            )
+        )
 
         executor.shutdown(wait=True)
 
