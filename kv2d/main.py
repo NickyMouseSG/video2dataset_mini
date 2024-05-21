@@ -14,7 +14,7 @@ def get_args():
     parser.add_argument("--output_dir", type=str, help="Output directory to save videos", default="videos")
     parser.add_argument("--max_retries", type=int, default=3, help="Maximum number of retries for failed downloads")
     parser.add_argument("--shard_size", type=int, default=1000, help="Number of videos to download in each shard")
-    parser.add_argument("--semaphore_limit", type=int, default=32, help="Maximum number of downloads accumulating in thread")
+    parser.add_argument("--semaphore_limit", type=int, default=16, help="Maximum number of downloads accumulating in thread")
     parser.add_argument("--log_file", type=str, default="video_downloader.log", help="Log file")
 
     # Sharder Arguments

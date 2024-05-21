@@ -96,18 +96,21 @@ class Sharder:
             ),
             verbose=False,
         )
-        logger.info(f"Input data ({len(df)} rows) has been sharded into {num_shards} shards in this rank.")
+        logger.info(f"Input data ({len(df)} rows) has been sharded into {num_shards} shards in rank {self.rank_id}.")
 
         return shard_files
+
+    def get_global_id(self, shard_id):
+        return self.shard_ids[shard_id]
 
     def fetch_shards(self, shard_ids):
         if len(shard_ids) == 0:
             []
         if len(shard_ids) == 1:
-            global_idx = self.shard_ids[shard_ids[0]]
+            global_idx = self.get_global_id(shard_ids[0])
             return [self.fetch_shard(shard_ids[0])], [global_idx]
         else:
-            global_idxs = [self.shard_ids[i] for i in shard_ids]
+            global_idxs = [self.get_global_id(i) for i in shard_ids]
             ret = map_async_with_thread(
                 iterable=shard_ids,
                 func=self.fetch_shard,
