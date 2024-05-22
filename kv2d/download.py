@@ -9,16 +9,18 @@ import pathos.multiprocessing as mp
 import multiprocessing
 import pandas as pd
 import time
+from huggingface_hub import HfApi
 
 from .writer import BufferedTextWriter, get_writer
 from .sharder import Sharder
+from .utils import shardid2name
 
-from kn_util.data.video import download_youtube_as_bytes, read_frames_decord, array_to_video_bytes
+from kn_util.data.video import download_youtube_as_bytes, read_frames_decord
 from kn_util.data.video.download import StorageLogger
 from kn_util.utils.rich import get_rich_progress_mofn
-from kn_util.utils.io import load_csv
 from kn_util.utils.download import MultiThreadDownloaderInMem
 from kn_util.utils.error import SuppressStdoutStderr
+from kn_util.utils.system import run_cmd
 
 
 @dataclass
@@ -45,7 +47,7 @@ def _download_single_youtube(url, semaphore, size):
 def _download_single_direct(url, semaphore):
     semaphore.acquire()
     try:
-        downloader = MultiThreadDownloaderInMem(verbose=False, max_retries=5, num_threads=4)
+        downloader = MultiThreadDownloaderInMem(verbose=False, max_retries=5, num_threads=1)
         video_bytes = downloader.download(url)
     except Exception as e:
         semaphore.release()
@@ -260,13 +262,17 @@ def download(
     num_threads=32,
     max_retries=3,
     semaphore_limit=128,
+    # upload arguments
+    upload=False,
+    repo_id=None,
+    delete_local=False,
 ):
     manager = multiprocessing.Manager()
     message_queue = manager.Queue()
 
-    def launch_job(shard_id):
-        url_shard, vid_shard, meta_shard = sharder.fetch_shard(shard_id)
-        global_shard_id = sharder.get_global_id(shard_id)
+    def launch_job(local_shard_id):
+        url_shard, vid_shard, meta_shard = sharder.fetch_shard(local_shard_id)
+        global_shard_id = sharder.get_global_id(local_shard_id)
         _, success, total = download_shard(
             url_shard=url_shard,
             vid_shard=vid_shard,
@@ -283,23 +289,58 @@ def download(
         )
         return global_shard_id, success, total
 
+    def upload_as_future(_shard_id):
+        nonlocal upload_futures
+        if upload:
+            logger.info(f"Uploading shard {_shard_id} as future")
+            api = HfApi()
+
+            filename = f"{shardid2name(_shard_id)}.tar"
+            future = api.upload_file(
+                path_or_fileobj=osp.join(output_dir, filename),
+                path_in_repo=filename,
+                repo_id=repo_id,
+                repo_type="dataset",
+                run_as_future=True,
+            )
+            future._tar_path = osp.join(output_dir, filename)
+            upload_futures.add(future)
+
+    def process_upload_futures():
+        nonlocal upload_futures
+        done_upload = set(future for future in upload_futures if future.done())
+        for upload_future in done_upload:
+            if delete_local:
+                tar_path = upload_future._tar_path
+                logger.info(f"Uploaded, deleting local tar file {tar_path}")
+                run_cmd(f"rm -rf {tar_path}", async_cmd=True)
+
     # ======================== DBEUG ========================
-    # launch_job(0)
     # import ipdb
     # ipdb.set_trace()
     # ======================================================
     num_shards = len(sharder)
     downloaded_shard_meta = osp.join(output_dir, ".meta", "downloaded_shard.txt")
-    shard_writer = BufferedTextWriter(downloaded_shard_meta, buffer_size=100)
-    downloaded_shard_ids = [int(_.split("\t")[0]) for _ in shard_writer.records]
+    global_shard_ids = [sharder.get_global_id(i) for i in range(0, num_shards)]  # global shard ids processed in current rank
+    upload_futures = set()
+
+    if not osp.exists(downloaded_shard_meta):
+        with open(downloaded_shard_meta, "w") as f:
+            pass
+
+    with open(downloaded_shard_meta, "r") as f:
+        downloaded_shard_ids = [int(_.split("\t")[0]) for _ in f.readlines()]
+        downloaded_shard_ids = [_ for _ in downloaded_shard_ids if _ in global_shard_ids]
+        for _id in downloaded_shard_ids:
+            upload_as_future(_id)
 
     executor = mp.ProcessPool(num_processes)
 
-    shard_ids_shard = [i for i in range(0, min(num_processes, num_shards)) if i not in downloaded_shard_ids]
+    local_shard_ids = [sharder.get_local_id(i) for i in global_shard_ids if i not in downloaded_shard_ids]
 
     not_done = set()
-    for shard_id in shard_ids_shard:
-        future = executor.apipe(launch_job, shard_id=shard_id)
+    for shard_id in local_shard_ids:
+        future = executor.apipe(launch_job, local_shard_id=shard_id)
         not_done.add(future)
 
     progress = get_rich_progress_mofn()
@@ -309,6 +350,9 @@ def download(
     while len(not_done) > 0:
         done, not_done = apipe_wait(not_done, interval=10.0)
 
+        # process huggingface upload promises
+        process_upload_futures()
+
         process_message_queue(
             message_queue=message_queue,
             progress=progress,
@@ -317,12 +361,15 @@ def download(
 
         for future in done:
             global_shard_id, success, total = future.get()
-            shard_writer.write("\t".join([str(global_shard_id), str(success), str(total)]))
+            with open(downloaded_shard_meta, "a") as f:
+                f.write("\t".join([str(global_shard_id), str(success), str(total)]))
 
-    shard_writer.close()
+            # upload to huggingface
+            upload_as_future(global_shard_id)
+
     progress.stop()
 
-    df = pd.read_csv(downloaded_shard_meta, columns=["shard_id", "success", "total"], delimiter="\t")
+    df = pd.read_csv(downloaded_shard_meta, header=["shard_id", "success", "total"], delimiter="\t")
     total_downloaded = df["total"].sum()
     total_finished = df["success"].sum()
 

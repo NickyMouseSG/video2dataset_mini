@@ -33,6 +33,11 @@ def get_args():
     parser.add_argument("--rank", type=int, default=0, help="Rank of the current node")
     parser.add_argument("--world_size", type=int, default=1, help="Total number of nodes")
 
+    # Upload Arguments
+    parser.add_argument("--upload", action="store_true", help="Upload videos to Hugging Face repository")
+    parser.add_argument("--delete_local", action="store_true", help="Delete videos after uploading")
+    parser.add_argument("--hf_repo", type=str, default=None, help="Hugging Face repository to upload videos to")
+
     return parser.parse_known_args()[0]
 
 
@@ -66,6 +71,10 @@ def main():
         num_threads=args.num_threads,
         semaphore_limit=args.semaphore_limit,
         max_retries=args.max_retries,
+        # upload
+        upload=args.upload,
+        repo_id=args.hf_repo,
+        delete_local=args.delete_local,
     )
 
 

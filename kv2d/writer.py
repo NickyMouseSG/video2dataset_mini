@@ -67,8 +67,9 @@ class CachedTarWriter(FileWriter):
 
 
 def get_writer(writer, output_dir, shard_id):
-    cache_dir = osp.join(output_dir, f"cache.{shard_id:04d}")
-    tar_file = osp.join(output_dir, f"{shard_id:04d}.tar")
+    from .utils import logits
+    cache_dir = osp.join(output_dir, f"cache.{shard_id:0{logits}d}")
+    tar_file = osp.join(output_dir, f"{shard_id:0{logits}d}.tar")
     if writer == "tar":
         return TarWriter(tar_file)
     elif writer == "file":

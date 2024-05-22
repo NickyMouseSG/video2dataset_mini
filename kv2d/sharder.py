@@ -81,14 +81,17 @@ class Sharder:
             return shard_file
 
         num_shard_per_rank = (num_shards + self.world_size - 1) // self.world_size
-        shard_ids_at_rank = [i for i in range(self.rank_id * num_shard_per_rank, (self.rank_id + 1) * num_shard_per_rank) if i < num_shards]
-        self.shard_ids = shard_ids_at_rank
-        shard_spans = [(i * shard_size, min((i + 1) * shard_size, len(df))) for i in shard_ids_at_rank]
-        df_shards = [df.slice(start, end - start + 1) for start, end in shard_spans]
+
+        # local_shard_ids is a list of shard_ids that are assigned to the current rank
+        # each element should be a global shard index
+        local_shard_ids = [i for i in range(self.rank_id * num_shard_per_rank, (self.rank_id + 1) * num_shard_per_rank) if i < num_shards]
+        self.local_shard_ids = local_shard_ids
+        shard_spans = [(i * shard_size, min((i + 1) * shard_size, len(df))) for i in local_shard_ids]
+        local_df_shards = [df.slice(start, end - start + 1) for start, end in shard_spans]
 
         # prevent slice df in multiple threads, not safe
         shard_files = map_async_with_thread(
-            iterable=list(zip(self.shard_ids, df_shards)),
+            iterable=list(zip(local_shard_ids, local_df_shards)),
             func=lambda x: write_shard(
                 df_shard=x[1],
                 shard_id=x[0],
@@ -96,23 +99,26 @@ class Sharder:
             ),
             verbose=False,
         )
-        logger.info(f"Input data ({len(df)} rows) has been sharded into {num_shards} shards in rank {self.rank_id}.")
+        logger.info(f"Input data ({len(df)} rows) has been sharded into {len(local_shard_ids)} shards in rank {self.rank_id}.")
 
         return shard_files
 
     def get_global_id(self, shard_id):
-        return self.shard_ids[shard_id]
+        return self.local_shard_ids[shard_id]
 
-    def fetch_shards(self, shard_ids):
-        if len(shard_ids) == 0:
+    def get_local_id(self, global_id):
+        return self.local_shard_ids.index(global_id)
+
+    def fetch_shards(self, local_shard_ids):
+        if len(local_shard_ids) == 0:
             []
-        if len(shard_ids) == 1:
-            global_idx = self.get_global_id(shard_ids[0])
-            return [self.fetch_shard(shard_ids[0])], [global_idx]
+        if len(local_shard_ids) == 1:
+            global_idx = self.get_global_id(local_shard_ids[0])
+            return [self.fetch_shard(local_shard_ids[0])], [global_idx]
         else:
-            global_idxs = [self.get_global_id(i) for i in shard_ids]
+            global_idxs = [self.get_global_id(i) for i in local_shard_ids]
             ret = map_async_with_thread(
-                iterable=shard_ids,
+                iterable=local_shard_ids,
                 func=self.fetch_shard,
                 verbose=False,
             )
@@ -122,10 +128,10 @@ class Sharder:
     def row_count(self):
         return self._row_count
 
-    def fetch_shard(self, shard_id):
+    def fetch_shard(self, local_shard_id):
         url_col = self.read_args.url_col
         vid_col = self.read_args.vid_col
-        shard_df = pa_feather.read_table(self.shard_files[shard_id])
+        shard_df = pa_feather.read_table(self.shard_files[local_shard_id])
         column_names = set(shard_df.column_names)
         column_names.remove(url_col)
         column_names.remove(vid_col)
