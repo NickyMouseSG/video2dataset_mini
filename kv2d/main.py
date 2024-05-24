@@ -75,6 +75,8 @@ def main():
         upload=args.upload,
         repo_id=args.hf_repo,
         delete_local=args.delete_local,
+        # debug
+        # profile=True,
     )
 
 

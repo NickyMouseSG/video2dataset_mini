@@ -11,6 +11,8 @@ import pandas as pd
 import time
 from huggingface_hub import HfApi
 
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+
 from .writer import BufferedTextWriter, get_writer
 from .sharder import Sharder
 from .utils import shardid2name
@@ -156,6 +158,8 @@ def download_shard(
     semaphore_limit=32,
     # message
     message_queue=None,
+    # debug
+    profile=False,
 ):
     os.makedirs(osp.join(output_dir, ".meta"), exist_ok=True)
     error_log = osp.join(output_dir, ".meta", f"{shard_id}.error")
@@ -180,7 +184,12 @@ def download_shard(
         max_retries=max_retries,
     )
 
+    st = time.time()
+
     for vid, video_bytes, errorcode in download_gen:
+        if profile:
+            logger.info(f"Downloaded {vid} in {time.time() - st:.2f}s")
+            st = time.time()
 
         if errorcode != 0:
             continue
@@ -198,16 +207,25 @@ def download_shard(
                     return_meta=True,
                 )
 
+                if profile:
+                    logger.info(f"Processed {vid} in {time.time() - st:.2f}s")
+                    st = time.time()
+
                 # write video
                 byte_writer.write(key=vid, frames=frames, video_meta=video_meta)
 
                 success += 1
                 message_queue.put(("PROGRESS", shard_id, 1))
 
+            if profile:
+                logger.info(f"Written {vid} in {time.time() - st:.2f}s")
+
             # vid_writer.write(vid)
         except Exception as e:
             error_writer.write("\t".join([vid, str(e)]))
             continue
+
+        st = time.time()
 
     byte_writer.close()
     message_queue.put(("END", shard_id))
@@ -266,6 +284,8 @@ def download(
     upload=False,
     repo_id=None,
     delete_local=False,
+    # debug
+    profile=False,
 ):
     manager = multiprocessing.Manager()
     message_queue = manager.Queue()
@@ -286,6 +306,7 @@ def download(
             semaphore_limit=semaphore_limit,
             num_threads=num_threads,
             message_queue=message_queue,
+            profile=profile,
         )
         return global_shard_id, success, total
 
@@ -316,6 +337,7 @@ def download(
                 run_cmd(f"rm -rf {tar_path}", async_cmd=True)
 
     # ======================== DBEUG ========================
+    # launch_job(0)
     # import ipdb
     # ipdb.set_trace()
     # ======================================================
@@ -329,7 +351,8 @@ def download(
             pass
 
     with open(downloaded_shard_meta, "r") as f:
-        downloaded_shard_ids = [int(_.split("\t")[0]) for _ in f.readlines()]
+        lines = [_.strip() for _ in f.readlines() if len(_.strip()) > 0]
+        downloaded_shard_ids = [int(_.split("\t")[0]) for _ in lines]
         downloaded_shard_ids = [_ for _ in downloaded_shard_ids if _ in global_shard_ids]
         for _id in downloaded_shard_ids:
             upload_as_future(_id)
@@ -362,7 +385,7 @@ def download(
         for future in done:
             global_shard_id, success, total = future.get()
             with open(downloaded_shard_meta, "a") as f:
-                f.write("\t".join([str(global_shard_id), str(success), str(total)]))
+                f.write("\t".join([str(global_shard_id), str(success), str(total)]) + "\n")
 
             # upload to huggingface
             upload_as_future(global_shard_id)

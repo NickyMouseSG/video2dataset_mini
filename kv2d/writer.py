@@ -3,9 +3,17 @@ import os, os.path as osp
 import numpy as np
 import multiprocessing as mp
 import tempfile
+import numpy as np
+import torch
+import time
+from loguru import logger
 
 from kn_util.utils.system import run_cmd
-from kn_util.data.video import save_video_imageio, array_to_video_bytes
+from kn_util.data.video import save_video_imageio, array_to_video_bytes, save_video_ffmpeg
+
+
+def is_tensor(x):
+    return isinstance(x, torch.Tensor) or isinstance(x, np.ndarray)
 
 
 class TarWriter:
@@ -13,9 +21,14 @@ class TarWriter:
         fd = open(tar_file, "wb")
         self.wds_writer = wds.TarWriter(fd)
 
-    def write(self, key, frames, fmt="mp4", video_meta=None):
-        video_bytes = array_to_video_bytes(frames, fps=video_meta["fps"])
+    def write(self, key, video_bytes, fmt="mp4", video_meta=None):
+        video_bytes = self.maybe_frames_to_bytes(video_bytes)
         self.wds_writer.write({"__key__": key, fmt: video_bytes})
+
+    def maybe_frames_to_bytes(self, frames):
+        if isinstance(frames, torch.Tensor) or isinstance(frames, np.ndarray):
+            video_bytes = array_to_video_bytes(frames)
+        return video_bytes
 
     @property
     def downloaded_vids(self):
@@ -33,7 +46,7 @@ class FileWriter:
     def write(self, key, frames, fmt="mp4", video_meta=None):
         cache_file = osp.join(self.cache_dir, f"{key}.{fmt}")
         with tempfile.NamedTemporaryFile(suffix="." + fmt, delete=False) as f:
-            save_video_imageio(frames, f.name, fps=video_meta["fps"])
+            save_video_ffmpeg(frames, f.name, fps=video_meta["fps"])
             run_cmd(f"mv {f.name} {cache_file}")
 
     @property
@@ -68,6 +81,7 @@ class CachedTarWriter(FileWriter):
 
 def get_writer(writer, output_dir, shard_id):
     from .utils import logits
+
     cache_dir = osp.join(output_dir, f"cache.{shard_id:0{logits}d}")
     tar_file = osp.join(output_dir, f"{shard_id:0{logits}d}.tar")
     if writer == "tar":
