@@ -421,7 +421,7 @@ def download(
             else:
                 import ipdb; ipdb.set_trace()
                 os.system(f"GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/datasets/k-nick/{repo_id}.git ~repo")
-                shard_names = [shardid2name(_) + ".tar" for _ in global_shard_ids]
+                shard_names = [osp.join(output_dir, shardid2name(_)) + ".tar" for _ in global_shard_ids]
                 os.system("mv " + " ".join(shard_names) + " ~repo")
                 os.chdir("~repo")
                 upload_files(batch_size=30)

@@ -18,13 +18,13 @@ class safe_open:
         self.lock_file = osp.join(cur_dir, f".{cur_filename}.lock")
 
     def __enter__(self):
-        while osp.exists(self.lock_file):
-            time.sleep(3)
+        while True:
+            try:
+                # 使用 os.open 以原子方式创建锁文件
+                self.fd = os.open(self.lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                break  # 成功创建锁文件，跳出循环
+            except FileExistsError:
+                time.sleep(3)  # 锁文件存在，等待
 
-        os.system(f"touch {self.lock_file}")
         self.f = open(self.filename, self.mode)
         return self.f
-
-    def __exit__(self, *args):
-        os.system(f"rm {self.lock_file}")
-        self.f.close()
