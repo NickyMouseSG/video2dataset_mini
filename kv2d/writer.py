@@ -7,6 +7,10 @@ import numpy as np
 import torch
 import time
 from loguru import logger
+from PIL import Image
+import json
+
+from .utils import safe_open
 
 from kn_util.utils.system import run_cmd
 from kn_util.data.video import save_video_imageio, array_to_video_bytes, save_video_ffmpeg
@@ -17,8 +21,9 @@ def is_tensor(x):
 
 
 class TarWriter:
-    def __init__(self, tar_file):
+    def __init__(self, tar_file, media="video"):
         fd = open(tar_file, "wb")
+        self.media = media
         self.wds_writer = wds.TarWriter(fd)
 
     def write(self, key, video_bytes, fmt="mp4", video_meta=None):
@@ -31,7 +36,7 @@ class TarWriter:
         return video_bytes
 
     @property
-    def downloaded_vids(self):
+    def downloaded_ids(self):
         return set()  # cannot resume vids from tar file
 
     def close(self):
@@ -39,57 +44,78 @@ class TarWriter:
 
 
 class FileWriter:
-    def __init__(self, cache_dir):
+    def __init__(self, cache_dir, process_args, media="video"):
         self.cache_dir = cache_dir
+        self.media = media
         os.makedirs(self.cache_dir, exist_ok=True)
+        self.quality = process_args.quality
 
-    def write(self, key, frames, fmt="mp4", video_meta=None):
+    def write(self, key, array, fmt="mp4", video_meta=None):
+        if isinstance(array, (bytearray, bytes)):
+            with open(osp.join(self.cache_dir, f"{key}.{fmt}"), "wb") as f:
+                f.write(array)
+
         cache_file = osp.join(self.cache_dir, f"{key}.{fmt}")
         with tempfile.NamedTemporaryFile(suffix="." + fmt, delete=False) as f:
-            save_video_ffmpeg(frames, f.name, fps=video_meta["fps"])
+            if self.media == "video":
+                # ! ffmpeg broken sometimes
+                # save_video_ffmpeg(array, f.name, fps=video_meta["fps"])
+                save_video_imageio(array, f.name, fps=video_meta["fps"], quality=self.quality)
+            elif self.media == "image":
+                Image.fromarray(array).save(f.name)
+            else:
+                raise ValueError(f"Invalid media type: {self.media}")
             run_cmd(f"mv {f.name} {cache_file}")
 
     @property
-    def downloaded_vids(self):
+    def downloaded_ids(self):
         cache_files = set(os.listdir(self.cache_dir))
-        downloaded_vids = set()
+        downloaded_ids = set()
         for cache_file in cache_files:
             key, _ = cache_file.split(".")
-            downloaded_vids.add(key)
+            downloaded_ids.add(key)
 
-        return downloaded_vids
-
-    def close(self):
-        pass
+        return downloaded_ids
 
 
 class CachedTarWriter(FileWriter):
-    def __init__(self, tar_file, cache_dir):
-        super().__init__(cache_dir)
+    def __init__(self, tar_file, cache_dir, process_args, media="video"):
+        super().__init__(cache_dir=cache_dir, media=media, process_args=process_args)
         self.tar_file = tar_file
 
     def close(self):
+        cur_dir = osp.dirname(self.tar_file)
+        key_file = osp.join(cur_dir, "keys.jsonl")
+        tar_filename = osp.basename(self.tar_file)
+
         writer = wds.TarWriter(open(self.tar_file, "wb"))
+        keys = set()
         for cache_file in os.listdir(self.cache_dir):
             with open(osp.join(self.cache_dir, cache_file), "rb") as f:
                 video_bytes = f.read()
                 key, fmt = cache_file.split(".")
                 writer.write({"__key__": key, fmt: video_bytes})
+                keys.add(key)
+
+        with safe_open(key_file, "a") as f:
+            item = {"tar": tar_filename, "keys": list(keys)}
+            json_str = json.dumps(item)
+            f.write(json_str + "\n")
 
         run_cmd(f"rm -rf {self.cache_dir}", async_cmd=True)
 
 
-def get_writer(writer, output_dir, shard_id):
+def get_writer(writer, output_dir, shard_id, process_args, media="video"):
     from .utils import logits
 
     cache_dir = osp.join(output_dir, f"cache.{shard_id:0{logits}d}")
     tar_file = osp.join(output_dir, f"{shard_id:0{logits}d}.tar")
     if writer == "tar":
-        return TarWriter(tar_file)
+        return TarWriter(tar_file, media=media)
     elif writer == "file":
-        return FileWriter(output_dir)
+        return FileWriter(output_dir, media=media)
     elif writer == "cached_tar":
-        return CachedTarWriter(tar_file, cache_dir=cache_dir)
+        return CachedTarWriter(tar_file, cache_dir=cache_dir, media=media, process_args=process_args)
     else:
         raise ValueError(f"Invalid writer: {writer}")
 

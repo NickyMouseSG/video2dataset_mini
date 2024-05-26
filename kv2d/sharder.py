@@ -12,7 +12,7 @@ from dataclasses import dataclass
 class ReadArguments:
     headers: bool = True
     url_col: str = "url"
-    vid_col: str = "vid"
+    id_col: str = "id"
 
 
 class Sharder:
@@ -130,15 +130,15 @@ class Sharder:
 
     def fetch_shard(self, local_shard_id):
         url_col = self.read_args.url_col
-        vid_col = self.read_args.vid_col
+        id_col = self.read_args.id_col
         shard_df = pa_feather.read_table(self.shard_files[local_shard_id])
         column_names = set(shard_df.column_names)
         column_names.remove(url_col)
-        column_names.remove(vid_col)
+        column_names.remove(id_col)
         shard_size = len(shard_df)
 
         url = shard_df[url_col].to_pylist()
-        vid = shard_df[vid_col].to_pylist()
+        vid = shard_df[id_col].to_pylist()
         if self.read_args.headers:
             url = url[1:]
             vid = vid[1:]
