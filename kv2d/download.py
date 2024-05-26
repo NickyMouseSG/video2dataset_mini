@@ -369,7 +369,6 @@ def download(
     # ======================== DBEUG ========================
     # launch_job(local_shard_ids[0])
     # import ipdb
-
     # ipdb.set_trace()
     # ======================================================
 
@@ -383,7 +382,7 @@ def download(
     task_mapping = {}
 
     while len(not_done) > 0:
-        done, not_done = apipe_wait(not_done, interval=10.0)
+        done, not_done = apipe_wait(not_done, interval=3.0)
 
         process_message_queue(
             message_queue=message_queue,
@@ -419,7 +418,6 @@ def download(
                 # this means some other ranks is uploading
                 time.sleep(10)
             else:
-                import ipdb; ipdb.set_trace()
                 os.system(f"GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/datasets/k-nick/{repo_id}.git ~repo")
                 shard_names = [osp.join(output_dir, shardid2name(_)) + ".tar" for _ in global_shard_ids]
                 os.system("mv " + " ".join(shard_names) + " ~repo")

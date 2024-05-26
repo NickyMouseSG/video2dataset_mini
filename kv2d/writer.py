@@ -54,6 +54,7 @@ class FileWriter:
         if isinstance(array, (bytearray, bytes)):
             with open(osp.join(self.cache_dir, f"{key}.{fmt}"), "wb") as f:
                 f.write(array)
+            return
 
         cache_file = osp.join(self.cache_dir, f"{key}.{fmt}")
         with tempfile.NamedTemporaryFile(suffix="." + fmt, delete=False) as f:
