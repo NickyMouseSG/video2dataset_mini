@@ -105,7 +105,7 @@ class CachedTarWriter(FileWriter):
             json_str = json.dumps(item)
             f.write(json_str + "\n")
 
-        run_cmd(f"rm -rf {self.cache_dir}", async_cmd=True)
+        run_cmd(f"rm -rf {self.cache_dir}", async_cmd=False)
 
 
 def get_writer(writer, output_dir, shard_id, process_args, media="video"):

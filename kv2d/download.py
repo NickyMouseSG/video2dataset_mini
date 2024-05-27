@@ -28,7 +28,7 @@ from kn_util.data.video.download import StorageLogger
 from kn_util.utils.rich import get_rich_progress_mofn
 from kn_util.utils.download import MultiThreadDownloaderInMem
 from kn_util.utils.error import SuppressStdoutStderr
-from kn_util.utils.system import run_cmd
+from kn_util.utils.system import run_cmd, force_delete_dir
 from kn_util.tools.lfs import upload_files
 
 
@@ -425,5 +425,6 @@ def download(
                 os.chdir("~repo")
                 upload_files(files=shard_names, batch_size=30)
                 os.chdir(cwd)
+                force_delete_dir("~repo")
                 os.system(f"rm -rf ~repo")
                 break
