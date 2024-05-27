@@ -20,11 +20,21 @@ class safe_open:
     def __enter__(self):
         while True:
             try:
-                # 使用 os.open 以原子方式创建锁文件
+                # Use os.open to atomically create the lock file
                 self.fd = os.open(self.lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                break  # 成功创建锁文件，跳出循环
+                break  # Successfully created lock file, exit loop
             except FileExistsError:
-                time.sleep(3)  # 锁文件存在，等待
+                time.sleep(3)  # Lock file exists, wait
 
         self.f = open(self.filename, self.mode)
         return self.f
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        # Close the file
+        self.f.close()
+        # Close the file descriptor for the lock file
+        os.close(self.fd)
+        # Remove the lock file
+        os.remove(self.lock_file)
+        # Returning False will propagate any exceptions
+        return False

@@ -421,7 +421,9 @@ def download(
                 os.system(f"GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/datasets/k-nick/{repo_id}.git ~repo")
                 shard_names = [osp.join(output_dir, shardid2name(_)) + ".tar" for _ in global_shard_ids]
                 os.system("mv " + " ".join(shard_names) + " ~repo")
+                cwd = os.getcwd()
                 os.chdir("~repo")
-                upload_files(batch_size=30)
+                upload_files(files=shard_names, batch_size=30)
+                os.chdir(cwd)
                 os.system(f"rm -rf ~repo")
                 break

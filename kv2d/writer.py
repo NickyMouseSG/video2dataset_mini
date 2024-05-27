@@ -90,16 +90,18 @@ class CachedTarWriter(FileWriter):
         tar_filename = osp.basename(self.tar_file)
 
         writer = wds.TarWriter(open(self.tar_file, "wb"))
-        keys = set()
-        for cache_file in os.listdir(self.cache_dir):
+        keys = []
+
+        cache_files = sorted(os.listdir(self.cache_dir))
+        for cache_file in cache_files:
             with open(osp.join(self.cache_dir, cache_file), "rb") as f:
                 video_bytes = f.read()
                 key, fmt = cache_file.split(".")
                 writer.write({"__key__": key, fmt: video_bytes})
-                keys.add(key)
+                keys.append(key)
 
         with safe_open(key_file, "a") as f:
-            item = {"tar": tar_filename, "keys": list(keys)}
+            item = {"tar": tar_filename, "keys": keys}
             json_str = json.dumps(item)
             f.write(json_str + "\n")
 
