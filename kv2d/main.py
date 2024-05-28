@@ -40,8 +40,11 @@ def get_args():
     parser.add_argument("--world_size", type=int, default=1, help="Total number of nodes")
 
     # Upload Arguments
-    parser.add_argument("--upload", action="store_true", help="Upload the downloaded videos to a cloud storage", default=False)
+    parser.add_argument("--upload_hf", action="store_true", help="Upload the downloaded videos to a cloud storage", default=False)
     parser.add_argument("--repo_id", type=str, help="Repository ID for the cloud storage")
+    parser.add_argument("--upload_s3", action="store_true", help="Upload the downloaded videos to an S3 bucket", default=False)
+    parser.add_argument("--bucket", type=str, help="Bucket name for the S3 storage")
+    parser.add_argument("--delete_local", action="store_true", help="Delete the local videos after uploading", default=False)
 
     # Debug Arguments
     parser.add_argument("--profile", action="store_true", help="Profile the download process", default=False)
@@ -88,8 +91,11 @@ def main():
         semaphore_limit=args.semaphore_limit,
         max_retries=args.max_retries,
         # upload
-        upload=args.upload,
+        upload_hf=args.upload_hf,
         repo_id=args.repo_id,
+        upload_s3=args.upload_s3,
+        bucket=args.bucket,
+        delete_local=args.delete_local,
         # debug
         profile=args.profile,
     )

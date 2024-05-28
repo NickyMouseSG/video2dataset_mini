@@ -28,8 +28,9 @@ from kn_util.data.video.download import StorageLogger
 from kn_util.utils.rich import get_rich_progress_mofn
 from kn_util.utils.download import MultiThreadDownloaderInMem
 from kn_util.utils.error import SuppressStdoutStderr
-from kn_util.utils.system import run_cmd, force_delete_dir
+from kn_util.utils.system import run_cmd, force_delete_dir, clear_process_dir
 from kn_util.tools.lfs import upload_files
+from kn_util.tools.rsync import RsyncTool
 
 
 @dataclass
@@ -320,8 +321,11 @@ def download(
     max_retries=3,
     semaphore_limit=128,
     # upload,
-    upload=False,
+    upload_hf=False,
     repo_id=None,
+    upload_s3=False,
+    bucket=None,
+    delete_local=False,
     # debug
     profile=False,
 ):
@@ -412,19 +416,31 @@ def download(
         )
     )
 
-    if upload:
-        while True:
-            if osp.isdir("~repo"):
-                # this means some other ranks is uploading
-                time.sleep(10)
-            else:
-                os.system(f"GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/datasets/k-nick/{repo_id}.git ~repo")
-                shard_names = [osp.join(output_dir, shardid2name(_)) + ".tar" for _ in global_shard_ids]
-                os.system("mv " + " ".join(shard_names) + " ~repo")
-                cwd = os.getcwd()
-                os.chdir("~repo")
-                upload_files(files=shard_names, batch_size=30)
-                os.chdir(cwd)
-                force_delete_dir("~repo")
-                os.system(f"rm -rf ~repo")
-                break
+    tar_filenames = [shardid2name(_) + ".tar" for _ in global_shard_ids]
+    tar_paths = [osp.join(output_dir, _) for _ in tar_filenames]
+
+    if upload_hf:
+        while osp.isdir("~repo"):
+            # this means some other ranks is uploading
+            time.sleep(1)
+
+        os.system(f"GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/datasets/k-nick/{repo_id}.git ~repo")
+        os.system("mv " + " ".join(tar_paths) + " ~repo")
+        cwd = os.getcwd()
+        os.chdir("~repo")
+        upload_files(files=tar_filenames, batch_size=30)
+        clear_process_dir(".")
+        os.system("mv " + " ".join(tar_filenames) + f"{cwd}/{output_dir}")
+        os.chdir(cwd)
+        os.system(f"rm -rf ~repo")
+
+    if upload_s3:
+        target_s3_bucket = f"/s3/{bucket}"
+        os.makedirs(target_s3_bucket, exist_ok=True)
+        # RsyncTool.launch_rsync(from_addr=output_dir, to_addr=target_s3_bucket, async_dir=True, path_filter=lambda x: x.endswith(".tar"))
+        os.system("scp " + " ".join(tar_paths) + f" {target_s3_bucket}")
+        logger.info(f"Uploaded {len(tar_paths)} files to {target_s3_bucket}")
+
+    if delete_local:
+        clear_process_dir(output_dir)
+        os.system(f"rm -rf " + " ".join(tar_paths))
