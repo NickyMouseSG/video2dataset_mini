@@ -40,7 +40,8 @@ class ProcessArguments:
     size: int = 512
     max_size: int = 512
     center_crop: bool = False
-    quality: int = 9
+    quality: int = 5
+    crf: int = 7
 
 
 def _download_single_youtube(url, size):

@@ -30,7 +30,8 @@ def get_args():
     parser.add_argument("--size", type=int, default=512, help="Size of the smaller dimension of the output video")
     parser.add_argument("--max_size", type=int, default=None, help="Maximum size of the smaller dimension of the output video")
     parser.add_argument("--center_crop", action="store_true", help="Center crop the video to the specified size", default=False)
-    parser.add_argument("--quality", type=int, default=9, help="Quality of the output video")
+    parser.add_argument("--quality", type=int, default=5, help="Quality of the output video")
+    parser.add_argument("--crf", type=int, default=23, help="CRF value for the output video")
 
     # Writer Arguments
     parser.add_argument("--writer", type=str, default="file", help="Writer to use for saving videos")
@@ -78,6 +79,7 @@ def main():
         max_size=args.max_size,
         center_crop=args.center_crop,
         quality=args.quality,
+        crf=args.crf,
     )
     download(
         media=args.media,

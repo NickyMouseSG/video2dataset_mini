@@ -48,7 +48,7 @@ class FileWriter:
         self.cache_dir = cache_dir
         self.media = media
         os.makedirs(self.cache_dir, exist_ok=True)
-        self.quality = process_args.quality
+        self.process_args = process_args
 
     def write(self, key, array, fmt="mp4", video_meta=None):
         if isinstance(array, (bytearray, bytes)):
@@ -59,9 +59,8 @@ class FileWriter:
         cache_file = osp.join(self.cache_dir, f"{key}.{fmt}")
         with tempfile.NamedTemporaryFile(suffix="." + fmt, delete=False) as f:
             if self.media == "video":
-                # ! ffmpeg broken sometimes
-                # save_video_ffmpeg(array, f.name, fps=video_meta["fps"])
-                save_video_imageio(array, f.name, fps=video_meta["fps"], quality=self.quality)
+                save_video_ffmpeg(array, f.name, fps=video_meta["fps"], crf=self.process_args.crf)
+                # save_video_imageio(array, f.name, fps=video_meta["fps"], quality=self.quality)
             elif self.media == "image":
                 Image.fromarray(array).save(f.name)
             else:
@@ -113,11 +112,9 @@ def get_writer(writer, output_dir, shard_id, process_args, media="video"):
 
     cache_dir = osp.join(output_dir, f"cache.{shard_id:0{logits}d}")
     tar_file = osp.join(output_dir, f"{shard_id:0{logits}d}.tar")
-    if writer == "tar":
-        return TarWriter(tar_file, media=media)
-    elif writer == "file":
-        return FileWriter(output_dir, media=media)
-    elif writer == "cached_tar":
+    if writer == "file":
+        return FileWriter(cache_dir=cache_dir, process_args=process_args, media=media)
+    elif writer == "tar":
         return CachedTarWriter(tar_file, cache_dir=cache_dir, media=media, process_args=process_args)
     else:
         raise ValueError(f"Invalid writer: {writer}")
