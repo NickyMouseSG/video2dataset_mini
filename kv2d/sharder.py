@@ -30,6 +30,7 @@ class Sharder:
     ):
         self.read_args = read_args
         df = self.read(input_file, read_args)
+
         self._row_count = len(df)
         os.makedirs(shard_dir, exist_ok=True)
 

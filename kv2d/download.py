@@ -1,4 +1,9 @@
-from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED, ProcessPoolExecutor
+from concurrent.futures import (
+    ThreadPoolExecutor,
+    wait,
+    FIRST_COMPLETED,
+    ProcessPoolExecutor,
+)
 from threading import Semaphore
 from loguru import logger
 import tempfile
@@ -50,15 +55,21 @@ def _download_single_youtube(url, size):
 
     # default video format from video2dataset
     # https://github.com/iejMac/video2dataset/blob/main/video2dataset/data_reader.py
-    video_format = f"wv*[height>={size}][ext=mp4]/" f"w[height>={size}][ext=mp4]/" "bv/b[ext=mp4]"
-    video_bytes, errorcode = download_youtube_as_bytes(url, video_format=video_format, logger=storage_logger)
+    video_format = (
+        f"wv*[height>={size}][ext=mp4]/" f"w[height>={size}][ext=mp4]/" "bv/b[ext=mp4]"
+    )
+    video_bytes, errorcode = download_youtube_as_bytes(
+        url, video_format=video_format, logger=storage_logger
+    )
 
     return video_bytes, errorcode, storage_logger.storage["error"]
 
 
 def _download_single_direct(url):
     try:
-        downloader = MultiThreadDownloaderInMem(verbose=False, max_retries=0, num_threads=1)
+        downloader = MultiThreadDownloaderInMem(
+            verbose=False, max_retries=0, num_threads=1
+        )
         video_bytes = downloader.download(url)
     except Exception as e:
         return None, 1, str(e)
@@ -157,7 +168,7 @@ def download_shard(
     media,
     # input shards
     url_shard,
-    vid_shard,
+    id_shard,
     meta_shard,
     # rank
     rank,
@@ -184,9 +195,17 @@ def download_shard(
 
     # vid_writer = BufferedTextWriter(downloaded_ids, buffer_size=10)
     error_writer = BufferedTextWriter(error_log, buffer_size=1)
-    byte_writer = get_writer(writer=writer, output_dir=output_dir, shard_id=shard_id, media=media, process_args=process_args)
+    byte_writer = get_writer(
+        writer=writer,
+        output_dir=output_dir,
+        shard_id=shard_id,
+        media=media,
+        process_args=process_args,
+    )
 
-    id_shard, url_shard, meta_shard = filter_shard(vid_shard, url_shard, meta_shard, byte_writer.downloaded_ids)
+    id_shard, url_shard, meta_shard = filter_shard(
+        id_shard, url_shard, meta_shard, byte_writer.downloaded_ids
+    )
     success = len(byte_writer.downloaded_ids)
     message_queue.put(("PROGRESS", shard_id, success))
 
@@ -245,7 +264,9 @@ def download_shard(
 
         elif media == "image":
             transforms = []
-            transforms.append(IT.Resize(size=process_args.size, max_size=process_args.max_size))
+            transforms.append(
+                IT.Resize(size=process_args.size, max_size=process_args.max_size)
+            )
             if process_args.center_crop:
                 transforms.append(IT.CenterCrop(size=process_args.size))
             transforms = IT.Compose(transforms)
@@ -329,17 +350,21 @@ def download(
     delete_local=False,
     # debug
     profile=False,
+    dry_run=False,
 ):
+    global dry_run_global
+    dry_run_global = dry_run
+
     manager = multiprocessing.Manager()
     message_queue = manager.Queue()
 
     def launch_job(local_shard_id):
-        url_shard, vid_shard, meta_shard = sharder.fetch_shard(local_shard_id)
+        url_shard, id_shard, meta_shard = sharder.fetch_shard(local_shard_id)
         global_shard_id = sharder.get_global_id(local_shard_id)
         _, success, total = download_shard(
             media=media,
             url_shard=url_shard,
-            vid_shard=vid_shard,
+            id_shard=id_shard,
             meta_shard=meta_shard,
             rank=rank,
             output_dir=output_dir,
@@ -355,8 +380,10 @@ def download(
         return global_shard_id, success, total
 
     num_shards = len(sharder)
-    downloaded_shard_meta = osp.join(output_dir, ".meta", "downloaded_shard.txt")
-    global_shard_ids = [sharder.get_global_id(i) for i in range(0, num_shards)]  # global shard ids processed in current rank
+    downloaded_shard_meta = osp.join(output_dir, ".meta", "downloaded_shards.txt")
+    global_shard_ids = [
+        sharder.get_global_id(i) for i in range(0, num_shards)
+    ]  # global shard ids processed in current rank
 
     if not osp.exists(downloaded_shard_meta):
         with open(downloaded_shard_meta, "w") as f:
@@ -365,13 +392,19 @@ def download(
     with open(downloaded_shard_meta, "r") as f:
         lines = [_.strip() for _ in f.readlines() if len(_.strip()) > 0]
         downloaded_shard_ids = [int(_.split("\t")[0]) for _ in lines]
-        downloaded_shard_ids = [_ for _ in downloaded_shard_ids if _ in global_shard_ids]
+        downloaded_shard_ids = [
+            _ for _ in downloaded_shard_ids if _ in global_shard_ids
+        ]
 
     executor = mp.ProcessPool(num_processes)
 
-    local_shard_ids = [sharder.get_local_id(i) for i in global_shard_ids if i not in downloaded_shard_ids]
+    local_shard_ids = [
+        sharder.get_local_id(i)
+        for i in global_shard_ids
+        if i not in downloaded_shard_ids
+    ]
 
-    # ======================== DBEUG ========================
+    # ======================== DEBUG ========================
     # launch_job(local_shard_ids[0])
     # import ipdb
     # ipdb.set_trace()
@@ -398,11 +431,15 @@ def download(
         for future in done:
             global_shard_id, success, total = future.get()
             with safe_open(downloaded_shard_meta, "a") as f:
-                f.write("\t".join([str(global_shard_id), str(success), str(total)]) + "\n")
+                f.write(
+                    "\t".join([str(global_shard_id), str(success), str(total)]) + "\n"
+                )
 
     progress.stop()
 
-    df = pd.read_csv(downloaded_shard_meta, names=["shard_id", "success", "total"], delimiter="\t")
+    df = pd.read_csv(
+        downloaded_shard_meta, names=["shard_id", "success", "total"], delimiter="\t"
+    )
     total_downloaded = df["total"].sum()
     total_finished = df["success"].sum()
 
@@ -425,7 +462,9 @@ def download(
             # this means some other ranks is uploading
             time.sleep(1)
 
-        os.system(f"GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/datasets/k-nick/{repo_id}.git ~repo")
+        os.system(
+            f"GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/datasets/k-nick/{repo_id}.git ~repo"
+        )
         os.system("mv " + " ".join(tar_paths) + " ~repo")
         cwd = os.getcwd()
         os.chdir("~repo")
