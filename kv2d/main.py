@@ -42,7 +42,7 @@ def get_args():
         help="Maximum number of downloads accumulating in thread",
     )
     parser.add_argument(
-        "--log_file", type=str, default="video_downloader.log", help="Log file"
+        "--log_file", type=str, default="downloader.log", help="Log file"
     )
 
     # Media Arguments
@@ -152,7 +152,7 @@ def main():
     setup_logger_loguru(filename=args.log_file)
 
     os.makedirs(osp.join(args.output_dir, ".meta"), exist_ok=True)
-    os.makedirs(osp.dirname(args.log_file), exist_ok=True)
+    os.makedirs(osp.dirname(osp.abspath(args.log_file)), exist_ok=True)
 
     read_args = ReadArguments(headers=True, url_col=args.url_col, id_col=args.id_col)
     sharder = Sharder(

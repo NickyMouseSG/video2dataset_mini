@@ -21,6 +21,7 @@ import io
 import numpy as np
 import torch
 import sys
+from einops import rearrange
 
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
@@ -102,6 +103,7 @@ def download_generator(
     meta_shard,
     # download args
     size=360,
+    media="video",
     # parallel
     num_threads=16,
     semaphore_limit=32,
@@ -115,6 +117,7 @@ def download_generator(
             download_single,
             url=url,
             size=size,
+            media=media,
             semaphore=semaphore,
         )
         future._input = dict(meta=meta, id=_id, url=url, retry_cnt=retry_cnt)
@@ -193,6 +196,12 @@ def download_shard(
     total = len(url_shard)
     message_queue.put(("START", shard_id, total))
 
+    # =================== DEBUG ======================
+    # item = download_single(url=url_shard[0], size=360, semaphore=Semaphore(1), media=media)
+    # import ipdb
+    # ipdb.set_trace() #FIXME ipdb
+    # ================================================
+
     # vid_writer = BufferedTextWriter(downloaded_ids, buffer_size=10)
     error_writer = BufferedTextWriter(error_log, buffer_size=1)
     byte_writer = get_writer(
@@ -213,6 +222,7 @@ def download_shard(
         url_shard=url_shard,
         id_shard=id_shard,
         meta_shard=meta_shard,
+        media=media,
         num_threads=num_threads,
         semaphore_limit=semaphore_limit,
         max_retries=max_retries,
@@ -224,6 +234,7 @@ def download_shard(
         if profile:
             logger.info(f"Downloaded {_id} in {time.time() - st:.2f}s")
             st = time.time()
+        
 
         if errorcode != 0:
             continue
@@ -274,13 +285,16 @@ def download_shard(
             try:
                 array = Image.open(io.BytesIO(_bytes)).convert("RGB")
                 array = torch.from_numpy(np.array(array))
+                array = rearrange(array, "h w c -> c h w")
                 array = transforms(array)
                 array = array.numpy()
+                array = rearrange(array, "c h w -> h w c")
 
                 # write video
-                byte_writer.write(key=_id, array=frames, fmt="jpeg")
+                byte_writer.write(key=_id, array=array, fmt="jpeg")
 
                 success += 1
+                message_queue.put(("PROGRESS", shard_id, 1))
 
             except Exception as e:
                 error_writer.write("\t".join([_id, str(e)]))
