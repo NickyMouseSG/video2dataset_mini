@@ -48,9 +48,15 @@ class Sharder:
         else:
             raise ValueError("headers must be a list or True")
 
+        # https://stackoverflow.com/questions/78056946/how-to-read-a-huge-csv-faster
+        # allow the block_size to cover the longest line
+        megabyte = 1<<20
+        max_len = max(len(line) for line in open(input_file, 'rb'))
+        block_size = megabyte * (1 + (max_len-1) // megabyte)  
+
         return pa_csv.read_csv(
             input_file,
-            read_options=pa_csv.ReadOptions(column_names=headers),
+            read_options=pa_csv.ReadOptions(column_names=headers, block_size=block_size),
             parse_options=pa_csv.ParseOptions(delimiter=delimiter),
         )
 
