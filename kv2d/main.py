@@ -8,15 +8,9 @@ from .sharder import Sharder, ReadArguments
 
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--input_file", type=str, required=True, help="Input file containing video URLs"
-    )
-    parser.add_argument(
-        "--num_processes", type=int, default=16, help="Number of processes to use"
-    )
-    parser.add_argument(
-        "--num_threads", type=int, default=16, help="Number of threads to use"
-    )
+    parser.add_argument("--input_file", type=str, required=True, help="Input file containing video URLs")
+    parser.add_argument("--num_processes", type=int, default=16, help="Number of processes to use")
+    parser.add_argument("--num_threads", type=int, default=16, help="Number of threads to use")
     parser.add_argument(
         "--output_dir",
         type=str,
@@ -41,22 +35,15 @@ def get_args():
         default=16,
         help="Maximum number of downloads accumulating in thread",
     )
-    parser.add_argument(
-        "--log_file", type=str, default="downloader.log", help="Log file"
-    )
+    parser.add_argument("--log_file", type=str, default="downloader.log", help="Log file")
 
     # Media Arguments
-    parser.add_argument(
-        "--media", type=str, default="video", help="Media type to download"
-    )
+    parser.add_argument("--media", type=str, default="video", help="Media type to download")
 
     # Sharder Arguments
-    parser.add_argument(
-        "--url_col", type=str, default="url", help="Column name for video URLs"
-    )
-    parser.add_argument(
-        "--id_col", type=str, default="id", help="Column name for video IDs"
-    )
+    parser.add_argument("--url_col", type=str, default="url", help="Column name for video URLs")
+    parser.add_argument("--id_col", type=str, default="id", help="Column name for video IDs")
+    parser.add_argument("--timestamp_col", type=str, default=None, help="Column name for timestamps")
 
     # Process Arguments
     parser.add_argument(
@@ -64,9 +51,7 @@ def get_args():
         action="store_true",
         help="All processing arguments will be ignored",
     )
-    parser.add_argument(
-        "--fps", type=int, default=8, help="Frames per second for the output video"
-    )
+    parser.add_argument("--fps", type=int, default=8, help="Frames per second for the output video")
     parser.add_argument(
         "--size",
         type=int,
@@ -85,23 +70,15 @@ def get_args():
         help="Center crop the video to the specified size",
         default=False,
     )
-    parser.add_argument(
-        "--quality", type=int, default=5, help="Quality of the output video"
-    )
-    parser.add_argument(
-        "--crf", type=int, default=23, help="CRF value for the output video"
-    )
+    parser.add_argument("--quality", type=int, default=5, help="Quality of the output video")
+    parser.add_argument("--crf", type=int, default=23, help="CRF value for the output video")
 
     # Writer Arguments
-    parser.add_argument(
-        "--writer", type=str, default="file", help="Writer to use for saving videos"
-    )
+    parser.add_argument("--writer", type=str, default="file", help="Writer to use for saving videos")
 
     # Multi-Node Arguments
     parser.add_argument("--rank", type=int, default=0, help="Rank of the current node")
-    parser.add_argument(
-        "--world_size", type=int, default=1, help="Total number of nodes"
-    )
+    parser.add_argument("--world_size", type=int, default=1, help="Total number of nodes")
 
     # Upload Arguments
     parser.add_argument(
@@ -110,9 +87,7 @@ def get_args():
         help="Upload the downloaded videos to a cloud storage",
         default=False,
     )
-    parser.add_argument(
-        "--repo_id", type=str, help="Repository ID for the cloud storage"
-    )
+    parser.add_argument("--repo_id", type=str, help="Repository ID for the cloud storage")
     parser.add_argument(
         "--upload_s3",
         action="store_true",
@@ -154,7 +129,7 @@ def main():
     os.makedirs(osp.join(args.output_dir, ".meta"), exist_ok=True)
     os.makedirs(osp.dirname(osp.abspath(args.log_file)), exist_ok=True)
 
-    read_args = ReadArguments(headers=True, url_col=args.url_col, id_col=args.id_col)
+    read_args = ReadArguments(headers=True, url_col=args.url_col, id_col=args.id_col, timestamp_col=args.timestamp_col)
     sharder = Sharder(
         input_file=args.input_file,
         read_args=read_args,

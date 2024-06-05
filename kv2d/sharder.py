@@ -13,6 +13,7 @@ class ReadArguments:
     headers: bool = True
     url_col: str = "url"
     id_col: str = "id"
+    timestamp_col: str = None
 
 
 class Sharder:
@@ -29,15 +30,14 @@ class Sharder:
         world_size=1,
     ):
         self.read_args = read_args
-        df = self.read(input_file, read_args)
+        df_gen = self.read(input_file, read_args)
 
-        self._row_count = len(df)
         os.makedirs(shard_dir, exist_ok=True)
 
         self.rank_id = rank_id
         self.world_size = world_size
 
-        self.shard_files = self.write_shards(df, shard_size=shard_size, shard_dir=shard_dir)
+        self.shard_files = self.write_shards(df_gen, shard_size=shard_size, shard_dir=shard_dir)
 
     def read_csv(self, input_file, delimiter=",", headers=True):
         if isinstance(headers, bool) and headers:
@@ -50,9 +50,9 @@ class Sharder:
 
         # https://stackoverflow.com/questions/78056946/how-to-read-a-huge-csv-faster
         # allow the block_size to cover the longest line
-        megabyte = 1<<20
-        max_len = max(len(line) for line in open(input_file, 'rb'))
-        block_size = megabyte * (1 + (max_len-1) // megabyte)  
+        megabyte = 1 << 20
+        max_len = max(len(line) for line in open(input_file, "rb"))
+        block_size = megabyte * (1 + (max_len - 1) // megabyte)
 
         return pa_csv.read_csv(
             input_file,
@@ -60,7 +60,7 @@ class Sharder:
             parse_options=pa_csv.ParseOptions(delimiter=delimiter),
         )
 
-    def read(self, input_file, read_args):
+    def read_single(self, input_file, read_args):
         file_format = input_file.split(".")[-1]
         if file_format in ["tsv"]:
             delimiter = "," if file_format == "csv" else "\t"
@@ -76,7 +76,14 @@ class Sharder:
         else:
             raise NotImplementedError(f"File format {file_format} not supported")
 
-    def write_shards(self, df, shard_size=1000, shard_dir="."):
+    def read(self, input_file, read_args):
+        if isinstance(input_file, list):
+            for file in input_file:
+                yield self.read_single(file, read_args)
+        else:
+            yield self.read_single(input_file, read_args)
+
+    def write_shards_single(self, df, shard_size=1000, shard_dir=".", shard_idx_offset=0):
         num_shards = (len(df) + shard_size - 1) // shard_size
         num_logits = len(str(num_shards))
 
@@ -91,7 +98,11 @@ class Sharder:
 
         # local_shard_ids is a list of shard_ids that are assigned to the current rank
         # each element should be a global shard index
-        local_shard_ids = [i for i in range(self.rank_id * num_shard_per_rank, (self.rank_id + 1) * num_shard_per_rank) if i < num_shards]
+        local_shard_ids = [
+            i + shard_idx_offset
+            for i in range(self.rank_id * num_shard_per_rank, (self.rank_id + 1) * num_shard_per_rank)
+            if i < num_shards
+        ]
         self.local_shard_ids = local_shard_ids
         shard_spans = [(i * shard_size, min((i + 1) * shard_size, len(df))) for i in local_shard_ids]
         local_df_shards = [df.slice(start, end - start + 1) for start, end in shard_spans]
@@ -107,6 +118,20 @@ class Sharder:
             verbose=False,
         )
         logger.info(f"Input data ({len(df)} rows) has been sharded into {len(local_shard_ids)} shards in rank {self.rank_id}.")
+
+        return shard_files, num_shards, len(df)
+
+    def write_shards(self, df_gen, shard_size=1000, shard_dir="."):
+        shard_files = []
+        self._row_count = 0
+        shard_idx_offset = 0
+        for df in df_gen:
+            cur_shard_files, cur_num_shards, cur_row_count = self.write_shards_single(
+                df, shard_size=shard_size, shard_dir=shard_dir, shard_idx_offset=shard_idx_offset
+            )
+            self._row_count += cur_row_count
+            shard_idx_offset += cur_num_shards
+            shard_files += cur_shard_files
 
         return shard_files
 
@@ -138,6 +163,8 @@ class Sharder:
     def fetch_shard(self, local_shard_id):
         url_col = self.read_args.url_col
         id_col = self.read_args.id_col
+        timestamp_col = self.read_args.timestamp_col
+
         shard_df = pa_feather.read_table(self.shard_files[local_shard_id])
         column_names = set(shard_df.column_names)
         column_names.remove(url_col)
@@ -146,13 +173,16 @@ class Sharder:
 
         url = shard_df[url_col].to_pylist()
         vid = shard_df[id_col].to_pylist()
+        timestamps = shard_df[timestamp_col].to_pylist() if timestamp_col else None
+
         if self.read_args.headers:
             url = url[1:]
             vid = vid[1:]
+            timestamps = timestamps[1:] if timestamps else None
 
         meta = [{k: shard_df[k][i] for k in column_names} for i in range(shard_size)]
 
-        return (url, vid, meta)
+        return (url, vid, timestamps, meta)
 
     def __getitem__(self, shard_id):
         return self.fetch_shard(shard_id)
