@@ -22,6 +22,8 @@ import numpy as np
 import torch
 import sys
 from einops import rearrange
+import yt_dlp
+from ffmpy import FFmpeg
 
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
@@ -42,6 +44,7 @@ from kn_util.tools.rsync import RsyncTool
 @dataclass
 class ProcessArguments:
     disabled: bool = False
+    process_download: bool = False
     fps: int = 8
     size: int = 512
     max_size: int = 512
@@ -50,27 +53,21 @@ class ProcessArguments:
     crf: int = 7
 
 
-def _download_single_youtube(url, size):
-    # use a fake logger to suppress output and capture error
-    storage_logger = StorageLogger()
+# def _download_single_youtube(url, size, timestamp):
+#     # use a fake logger to suppress output and capture error
+#     storage_logger = StorageLogger()
 
-    # default video format from video2dataset
-    # https://github.com/iejMac/video2dataset/blob/main/video2dataset/data_reader.py
-    video_format = (
-        f"wv*[height>={size}][ext=mp4]/" f"w[height>={size}][ext=mp4]/" "bv/b[ext=mp4]"
-    )
-    video_bytes, errorcode = download_youtube_as_bytes(
-        url, video_format=video_format, logger=storage_logger
-    )
+#     # default video format from video2dataset
+#     # https://github.com/iejMac/video2dataset/blob/main/video2dataset/data_reader.py
+#     video_format = f"wv*[height>={size}][ext=mp4]/" f"w[height>={size}][ext=mp4]/" "bv/b[ext=mp4]"
+#     video_bytes, errorcode = download_youtube_as_bytes(url, video_format=video_format, logger=storage_logger)
 
-    return video_bytes, errorcode, storage_logger.storage["error"]
+#     return video_bytes, errorcode, storage_logger.storage["error"]
 
 
 def _download_single_direct(url):
     try:
-        downloader = MultiThreadDownloaderInMem(
-            verbose=False, max_retries=0, num_threads=1
-        )
+        downloader = MultiThreadDownloaderInMem(verbose=False, max_retries=0, num_threads=1)
         video_bytes = downloader.download(url)
     except Exception as e:
         return None, 1, str(e)
@@ -78,17 +75,82 @@ def _download_single_direct(url):
     return video_bytes, 0, None
 
 
-def download_single(url, size, semaphore, media="video"):
+def _get_target_size(orig_size, size, mode="shortest", divisible_by=1):
+    cmp = lambda x, y: x < y if mode == "shortest" else x > y
+    if cmp(orig_size[0], orig_size[1]):
+        target_size = [size, int(size * orig_size[1] / orig_size[0])]
+    else:
+        target_size = [int(size * orig_size[0] / orig_size[1]), size]
+
+    target_size[0] = target_size[0] // divisible_by * divisible_by
+    target_size[1] = target_size[1] // divisible_by * divisible_by
+
+    return target_size
+
+
+def _download_single_ffmpeg(url, timestamp=None, orig_size=None, process_args=None):
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as f:
+            output_kwargs = []
+            if timestamp is not None:
+                # st, ed = parse_timestamps(timestamp)
+                st, ed = timestamp.split("-")
+                output_kwargs += [f"-ss {st} -to {ed}"]
+
+            output_kwargs = " ".join(output_kwargs)
+
+            if process_args.process_download:
+                size = _get_target_size(orig_size, process_args.size, divisible_by=2)
+                output_kwargs += f" -vf scale={size[0]}:{size[1]} -crf {process_args.crf} -codec:v libx264 -pix_fmt yuv420p -f mp4"
+
+            ff = FFmpeg(
+                inputs={url: None},
+                outputs={f.name: output_kwargs},
+                global_options="-hide_banner -loglevel error -y -http_persistent 0",
+            )
+
+            with SuppressStdoutStderr():
+                ff.run()
+
+            with open(f.name, "rb") as f:
+                video_bytes = f.read()
+                return video_bytes, 0, None
+    except Exception as e:
+        return None, 1, str(e)
+
+
+def download_single(url, size, semaphore, process_args=None, timestamp=None, media="video"):
     _bytes = None
     errorcode = 0
     error_str = None
     semaphore.acquire()
 
     if media == "video":
-        if "youtube.com" in url:
-            _bytes, errorcode, error_str = _download_single_youtube(url, size=size)
-        elif url.endswith(".mp4") or url.endswith(".avi") or url.endswith(".mkv"):
+        if not (url.endswith(".mp4") or url.endswith(".avi") or url.endswith(".mkv")):
+            # default video format from video2dataset
+            # https://github.com/iejMac/video2dataset/blob/main/video2dataset/data_reader.py
+            video_format = f"wv*[height>={size}][ext=mp4]/" f"w[height>={size}][ext=mp4]/" "bv/b[ext=mp4]"
+            # https://stackoverflow.com/questions/73673489/how-to-pass-get-url-flag-to-youtube-dl-or-yt-dlp-when-embedded-in-code
+            options = {
+                "quiet": True,
+                "simulate": True,
+                "forceurl": True,
+                "format": video_format,
+            }
+            with yt_dlp.YoutubeDL(options) as ydl:
+                try:
+                    info = ydl.extract_info(url, download=False)
+                except Exception as e:
+                    return None, 1, str(e)
+                if "entries" in info:
+                    info = info["entries"][0]
+                url = info["url"]
+                orig_size = (info["width"], info["height"])
+
+            _bytes, errorcode, error_str = _download_single_ffmpeg(url, timestamp, orig_size, process_args)
+        else:
             _bytes, errorcode, error_str = _download_single_direct(url)
+
     elif media == "image":
         _bytes, errorcode, error_str = _download_single_direct(url)
     else:
@@ -100,10 +162,12 @@ def download_single(url, size, semaphore, media="video"):
 def download_generator(
     url_shard,
     id_shard,
+    timestamp_shard,
     meta_shard,
     # download args
     size=360,
     media="video",
+    process_args=None,
     # parallel
     num_threads=16,
     semaphore_limit=32,
@@ -112,21 +176,23 @@ def download_generator(
     executor = ThreadPoolExecutor(num_threads)
     semaphore = Semaphore(semaphore_limit)
 
-    def submit_job(url, _id, meta, retry_cnt=0):
+    def submit_job(url, _id, timestamp, meta, retry_cnt=0):
         future = executor.submit(
             download_single,
             url=url,
             size=size,
+            timestamp=timestamp,
             media=media,
             semaphore=semaphore,
+            process_args=process_args,
         )
-        future._input = dict(meta=meta, id=_id, url=url, retry_cnt=retry_cnt)
+        future._input = dict(meta=meta, id=_id, url=url, timestamp=timestamp, retry_cnt=retry_cnt)
         return future
 
     def submit_jobs(ids):
         futures = set()
         for i in ids:
-            future = submit_job(url_shard[i], id_shard[i], meta_shard[i], retry_cnt=0)
+            future = submit_job(url_shard[i], id_shard[i], timestamp_shard[i], meta_shard[i], retry_cnt=0)
             futures.add(future)
         return futures
 
@@ -141,6 +207,7 @@ def download_generator(
             url = future._input["url"]
             meta = future._input["meta"]
             _id = future._input["id"]
+            timestamp = future._input["timestamp"]
             retry_cnt = future._input["retry_cnt"]
 
             if errorcode == 0:
@@ -148,23 +215,26 @@ def download_generator(
             else:
                 yield _id, None, errorcode
                 if retry_cnt + 1 < max_retries:
-                    submit_job(url, _id, meta, retry_cnt=retry_cnt + 1)
+                    submit_job(url, _id, timestamp, meta, retry_cnt=retry_cnt + 1)
             semaphore.release()
 
 
-def filter_shard(vid_shard, url_shard, meta_shard, downloaded_ids):
+def filter_shard(vid_shard, url_shard, timestamp_shard, meta_shard, downloaded_ids):
     new_vid_shard = []
     new_url_shard = []
+    new_timestamp_shard = []
     new_meta_shard = []
     for i in range(len(vid_shard)):
         if vid_shard[i] not in downloaded_ids:
             new_vid_shard.append(vid_shard[i])
             new_url_shard.append(url_shard[i])
+            new_timestamp_shard.append(timestamp_shard[i])
             new_meta_shard.append(meta_shard[i])
     vid_shard = new_vid_shard
     url_shard = new_url_shard
+    timestamp_shard = new_timestamp_shard
     meta_shard = new_meta_shard
-    return vid_shard, url_shard, meta_shard
+    return vid_shard, url_shard, timestamp_shard, meta_shard
 
 
 def download_shard(
@@ -172,6 +242,7 @@ def download_shard(
     # input shards
     url_shard,
     id_shard,
+    timestamp_shard,
     meta_shard,
     # rank
     rank,
@@ -196,10 +267,20 @@ def download_shard(
     total = len(url_shard)
     message_queue.put(("START", shard_id, total))
 
+    if timestamp_shard is None:
+        timestamp_shard = [None] * total
+
     # =================== DEBUG ======================
-    # item = download_single(url=url_shard[0], size=360, semaphore=Semaphore(1), media=media)
-    # import ipdb
-    # ipdb.set_trace() #FIXME ipdb
+    # for i in range(total):
+    #     video_bytes, errorcode, msg = download_single(
+    #         url=url_shard[i],
+    #         timestamp=timestamp_shard[i],
+    #         size=360,
+    #         semaphore=Semaphore(1),
+    #         media=media,
+    #         process_args=process_args,
+    #     )
+    #     import ipdb; ipdb.set_trace()
     # ================================================
 
     # vid_writer = BufferedTextWriter(downloaded_ids, buffer_size=10)
@@ -212,8 +293,8 @@ def download_shard(
         process_args=process_args,
     )
 
-    id_shard, url_shard, meta_shard = filter_shard(
-        id_shard, url_shard, meta_shard, byte_writer.downloaded_ids
+    id_shard, url_shard, timestamp_shard, meta_shard = filter_shard(
+        id_shard, url_shard, timestamp_shard, meta_shard, byte_writer.downloaded_ids
     )
     success = len(byte_writer.downloaded_ids)
     message_queue.put(("PROGRESS", shard_id, success))
@@ -221,8 +302,10 @@ def download_shard(
     download_gen = download_generator(
         url_shard=url_shard,
         id_shard=id_shard,
+        timestamp_shard=timestamp_shard,
         meta_shard=meta_shard,
         media=media,
+        process_args=process_args,
         num_threads=num_threads,
         semaphore_limit=semaphore_limit,
         max_retries=max_retries,
@@ -234,7 +317,6 @@ def download_shard(
         if profile:
             logger.info(f"Downloaded {_id} in {time.time() - st:.2f}s")
             st = time.time()
-        
 
         if errorcode != 0:
             continue
@@ -275,9 +357,7 @@ def download_shard(
 
         elif media == "image":
             transforms = []
-            transforms.append(
-                IT.Resize(size=process_args.size, max_size=process_args.max_size)
-            )
+            transforms.append(IT.Resize(size=process_args.size, max_size=process_args.max_size))
             if process_args.center_crop:
                 transforms.append(IT.CenterCrop(size=process_args.size))
             transforms = IT.Compose(transforms)
@@ -373,12 +453,13 @@ def download(
     message_queue = manager.Queue()
 
     def launch_job(local_shard_id):
-        url_shard, id_shard, meta_shard = sharder.fetch_shard(local_shard_id)
+        url_shard, id_shard, timestamp_shard, meta_shard = sharder.fetch_shard(local_shard_id)
         global_shard_id = sharder.get_global_id(local_shard_id)
         _, success, total = download_shard(
             media=media,
             url_shard=url_shard,
             id_shard=id_shard,
+            timestamp_shard=timestamp_shard,
             meta_shard=meta_shard,
             rank=rank,
             output_dir=output_dir,
@@ -395,9 +476,7 @@ def download(
 
     num_shards = len(sharder)
     downloaded_shard_meta = osp.join(output_dir, ".meta", "downloaded_shards.txt")
-    global_shard_ids = [
-        sharder.get_global_id(i) for i in range(0, num_shards)
-    ]  # global shard ids processed in current rank
+    global_shard_ids = [sharder.get_global_id(i) for i in range(0, num_shards)]  # global shard ids processed in current rank
 
     if not osp.exists(downloaded_shard_meta):
         with open(downloaded_shard_meta, "w") as f:
@@ -406,21 +485,16 @@ def download(
     with open(downloaded_shard_meta, "r") as f:
         lines = [_.strip() for _ in f.readlines() if len(_.strip()) > 0]
         downloaded_shard_ids = [int(_.split("\t")[0]) for _ in lines]
-        downloaded_shard_ids = [
-            _ for _ in downloaded_shard_ids if _ in global_shard_ids
-        ]
+        downloaded_shard_ids = [_ for _ in downloaded_shard_ids if _ in global_shard_ids]
 
     executor = mp.ProcessPool(num_processes)
 
-    local_shard_ids = [
-        sharder.get_local_id(i)
-        for i in global_shard_ids
-        if i not in downloaded_shard_ids
-    ]
+    local_shard_ids = [sharder.get_local_id(i) for i in global_shard_ids if i not in downloaded_shard_ids]
 
     # ======================== DEBUG ========================
     # launch_job(local_shard_ids[0])
     # import ipdb
+
     # ipdb.set_trace()
     # ======================================================
 
@@ -445,15 +519,11 @@ def download(
         for future in done:
             global_shard_id, success, total = future.get()
             with safe_open(downloaded_shard_meta, "a") as f:
-                f.write(
-                    "\t".join([str(global_shard_id), str(success), str(total)]) + "\n"
-                )
+                f.write("\t".join([str(global_shard_id), str(success), str(total)]) + "\n")
 
     progress.stop()
 
-    df = pd.read_csv(
-        downloaded_shard_meta, names=["shard_id", "success", "total"], delimiter="\t"
-    )
+    df = pd.read_csv(downloaded_shard_meta, names=["shard_id", "success", "total"], delimiter="\t")
     total_downloaded = df["total"].sum()
     total_finished = df["success"].sum()
 
@@ -476,9 +546,7 @@ def download(
             # this means some other ranks is uploading
             time.sleep(1)
 
-        os.system(
-            f"GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/datasets/k-nick/{repo_id}.git ~repo"
-        )
+        os.system(f"GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/datasets/k-nick/{repo_id}.git ~repo")
         os.system("mv " + " ".join(tar_paths) + " ~repo")
         cwd = os.getcwd()
         os.chdir("~repo")

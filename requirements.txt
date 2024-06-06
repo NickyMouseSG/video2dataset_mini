@@ -1,0 +1,5 @@
+yt_dlp
+ffmpy
+ffmpeg
+imageio[ffmpeg]
+imageio

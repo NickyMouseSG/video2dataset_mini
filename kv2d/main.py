@@ -2,6 +2,7 @@ import argparse
 from kn_util.utils.io import load_csv
 import os
 import os.path as osp
+from loguru import logger
 from .download import download, ProcessArguments
 from .sharder import Sharder, ReadArguments
 
@@ -47,10 +48,11 @@ def get_args():
 
     # Process Arguments
     parser.add_argument(
-        "--download-only",
+        "--download_only",
         action="store_true",
         help="All processing arguments will be ignored",
     )
+    parser.add_argument("--process_download", action="store_true", help="Process videos while downloading")
     parser.add_argument("--fps", type=int, default=8, help="Frames per second for the output video")
     parser.add_argument(
         "--size",
@@ -124,7 +126,15 @@ def main():
 
     args = get_args()
 
-    setup_logger_loguru(filename=args.log_file)
+    setup_logger_loguru(filename=args.log_file, logger=logger)
+
+    if args.process_download:
+        assert args.download_only, "Please set args.download_only=True to disable processing *after* downloading"
+    
+    # if args.timestamp_col is not None:
+    #     logger.info("Forced to set args.download_only and args.process_download to True when using timestamp_col")
+    #     args.download_only = True
+    #     args.process_download = True
 
     os.makedirs(osp.join(args.output_dir, ".meta"), exist_ok=True)
     os.makedirs(osp.dirname(osp.abspath(args.log_file)), exist_ok=True)
@@ -141,6 +151,7 @@ def main():
 
     process_args = ProcessArguments(
         disabled=args.download_only,
+        process_download=args.process_download,
         fps=args.fps,
         size=args.size,
         max_size=args.max_size,

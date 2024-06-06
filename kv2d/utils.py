@@ -1,5 +1,6 @@
 import os, os.path as osp
 import time
+import re
 
 logits = 4
 
@@ -38,3 +39,29 @@ class safe_open:
         os.remove(self.lock_file)
         # Returning False will propagate any exceptions
         return False
+
+
+from datetime import datetime, timedelta
+
+
+# def parse_timestamps(timestamps):
+#     st_str, ed_str = timestamps.split("-")
+
+#     def _parse(t_str):
+#         if ":" not in t_str:
+#             t = timedelta(seconds=int(st_str))
+#         elif t_str.count(":") == 1:
+#             t = datetime.strptime(t_str, "%M:%S")
+#         elif t_str.count(":") == 2:
+#             t = datetime.strptime(t_str, "%H:%M:%S")
+#         else:
+#             raise ValueError(f"Invalid timestamp format: {t_str}")
+#         return t
+
+#     st = _parse(st_str)
+#     ed = _parse(ed_str)
+
+#     delta = ed - st
+#     delta_seconds = delta.total_seconds()
+
+#     return st.strftime("%H:%M:%S"), delta_seconds
