@@ -23,7 +23,7 @@ import torch
 import sys
 from einops import rearrange
 import yt_dlp
-from ffmpy import FFmpeg
+from ffmpy import FFmpeg, FFprobe
 
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
@@ -75,6 +75,24 @@ def _download_single_direct(url):
     return video_bytes, 0, None
 
 
+def _get_online_video_size(url):
+    # ffmpeg -i <url> -v quiet -select_streams v:0 -show_entries stream=width,height -of csv=p=0
+    ffp = FFprobe(
+        inputs={url: None},
+        global_options="-v quiet -select_streams v:0 -show_entries stream=width,height -of csv=p=0",
+    )
+    cmd = ffp.cmd
+    result_str = run_cmd(cmd, verbose=False).stdout
+
+    result = result_str.strip().split(",")
+    try:
+        result = [int(_) for _ in result]
+    except:
+        raise ValueError(f"Failed to get video size from {url}\n{cmd}")
+
+    return result
+
+
 def _get_target_size(orig_size, size, mode="shortest", divisible_by=1):
     cmp = lambda x, y: x < y if mode == "shortest" else x > y
     if cmp(orig_size[0], orig_size[1]):
@@ -88,7 +106,7 @@ def _get_target_size(orig_size, size, mode="shortest", divisible_by=1):
     return target_size
 
 
-def _download_single_ffmpeg(url, timestamp=None, orig_size=None, process_args=None):
+def _download_single_ffmpeg(url, timestamp=None, orig_size=None, process_args=None, persistent_http=False):
     try:
         with tempfile.NamedTemporaryFile(suffix=".mp4") as f:
             output_kwargs = []
@@ -103,14 +121,18 @@ def _download_single_ffmpeg(url, timestamp=None, orig_size=None, process_args=No
                 size = _get_target_size(orig_size, process_args.size, divisible_by=2)
                 output_kwargs += f" -vf scale={size[0]}:{size[1]} -crf {process_args.crf} -codec:v libx264 -pix_fmt yuv420p -f mp4"
 
+            global_options = "-hide_banner -loglevel error -y"
+            if persistent_http:
+                global_options += " -http_persistent 0"
+
             ff = FFmpeg(
                 inputs={url: None},
                 outputs={f.name: output_kwargs},
-                global_options="-hide_banner -loglevel error -y -http_persistent 0",
+                global_options=global_options,
             )
 
-            with SuppressStdoutStderr():
-                ff.run()
+            cmd = ff.cmd
+            run_cmd(cmd, verbose=False)
 
             with open(f.name, "rb") as f:
                 video_bytes = f.read()
@@ -125,36 +147,38 @@ def download_single(url, size, semaphore, process_args=None, timestamp=None, med
     error_str = None
     semaphore.acquire()
 
-    if media == "video":
-        if not (url.endswith(".mp4") or url.endswith(".avi") or url.endswith(".mkv")):
-            # default video format from video2dataset
-            # https://github.com/iejMac/video2dataset/blob/main/video2dataset/data_reader.py
-            video_format = f"wv*[height>={size}][ext=mp4]/" f"w[height>={size}][ext=mp4]/" "bv/b[ext=mp4]"
-            # https://stackoverflow.com/questions/73673489/how-to-pass-get-url-flag-to-youtube-dl-or-yt-dlp-when-embedded-in-code
-            options = {
-                "quiet": True,
-                "simulate": True,
-                "forceurl": True,
-                "format": video_format,
-            }
-            with yt_dlp.YoutubeDL(options) as ydl:
-                try:
+    try:
+        if media == "video":
+            if not (url.endswith(".mp4") or url.endswith(".avi") or url.endswith(".mkv")):
+                # default video format from video2dataset
+                # https://github.com/iejMac/video2dataset/blob/main/video2dataset/data_reader.py
+                video_format = f"wv*[height>={size}][ext=mp4]/" f"w[height>={size}][ext=mp4]/" "bv/b[ext=mp4]"
+                # https://stackoverflow.com/questions/73673489/how-to-pass-get-url-flag-to-youtube-dl-or-yt-dlp-when-embedded-in-code
+                options = {
+                    "quiet": True,
+                    "simulate": True,
+                    "forceurl": True,
+                    "format": video_format,
+                }
+                with yt_dlp.YoutubeDL(options) as ydl:
                     info = ydl.extract_info(url, download=False)
-                except Exception as e:
-                    return None, 1, str(e)
-                if "entries" in info:
-                    info = info["entries"][0]
-                url = info["url"]
-                orig_size = (info["width"], info["height"])
+                    if "entries" in info:
+                        info = info["entries"][0]
+                    url = info["url"]
+                    orig_size = (info["width"], info["height"])
+                persistent_http = True
+            else:
+                orig_size = _get_online_video_size(url)
+                persistent_http = False
 
-            _bytes, errorcode, error_str = _download_single_ffmpeg(url, timestamp, orig_size, process_args)
-        else:
+            _bytes, errorcode, error_str = _download_single_ffmpeg(url, timestamp, orig_size, process_args, persistent_http=persistent_http)
+
+        elif media == "image":
             _bytes, errorcode, error_str = _download_single_direct(url)
-
-    elif media == "image":
-        _bytes, errorcode, error_str = _download_single_direct(url)
-    else:
-        raise ValueError(f"Invalid media type: {media}")
+        else:
+            raise ValueError(f"Invalid media type: {media}")
+    except Exception as e:
+        return None, 1, str(e)
 
     return _bytes, errorcode, error_str
 
@@ -270,6 +294,16 @@ def download_shard(
     if timestamp_shard is None:
         timestamp_shard = [None] * total
 
+    # vid_writer = BufferedTextWriter(downloaded_ids, buffer_size=10)
+    error_writer = BufferedTextWriter(error_log, buffer_size=1)
+    byte_writer = get_writer(
+        writer=writer,
+        output_dir=output_dir,
+        shard_id=shard_id,
+        media=media,
+        process_args=process_args,
+    )
+
     # =================== DEBUG ======================
     # for i in range(total):
     #     video_bytes, errorcode, msg = download_single(
@@ -280,18 +314,9 @@ def download_shard(
     #         media=media,
     #         process_args=process_args,
     #     )
+    #     byte_writer.write(key=id_shard[i], array=video_bytes, fmt="mp4")
     #     import ipdb; ipdb.set_trace()
     # ================================================
-
-    # vid_writer = BufferedTextWriter(downloaded_ids, buffer_size=10)
-    error_writer = BufferedTextWriter(error_log, buffer_size=1)
-    byte_writer = get_writer(
-        writer=writer,
-        output_dir=output_dir,
-        shard_id=shard_id,
-        media=media,
-        process_args=process_args,
-    )
 
     id_shard, url_shard, timestamp_shard, meta_shard = filter_shard(
         id_shard, url_shard, timestamp_shard, meta_shard, byte_writer.downloaded_ids

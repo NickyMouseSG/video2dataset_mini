@@ -130,6 +130,11 @@ def main():
 
     if args.process_download:
         assert args.download_only, "Please set args.download_only=True to disable processing *after* downloading"
+        if args.num_threads * args.num_processes > 128:
+            print("Please set num_threads * num_processes <= 128")
+            args.num_threads = max(128 // args.num_processes, 1)
+            print(f"Setting num_threads to {args.num_threads}")
+        
     
     # if args.timestamp_col is not None:
     #     logger.info("Forced to set args.download_only and args.process_download to True when using timestamp_col")
@@ -159,6 +164,7 @@ def main():
         quality=args.quality,
         crf=args.crf,
     )
+
     download(
         media=args.media,
         sharder=sharder,
