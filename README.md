@@ -1,9 +1,12 @@
 # To-Do
 
-- [*] Support feather table for sharding meta (.csv does not support too many urls)
+- [*] Support feather table for sharding meta
+- [*] Support Image Downloading
+- [*] Support partially downloading video given timestamps
+- [*] Integrating all transforms into single processor (comparing to many sub-samplers in original video2dataset)
 
 # Install kn_util
-
+Some basic functions are provided by kn_util (a personal toolkit)
 ```bash
 pip install git+https://github.com/K-Nick/kn-toolkit
 ```
