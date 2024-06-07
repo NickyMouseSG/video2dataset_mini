@@ -3,8 +3,9 @@ from kn_util.utils.io import load_csv
 import os
 import os.path as osp
 from loguru import logger
-from .download import download, ProcessArguments
+from .download import download
 from .sharder import Sharder, ReadArguments
+from .process import VideoProcessArgs, ImageProcessArgs
 
 
 def get_args():
@@ -47,33 +48,13 @@ def get_args():
     parser.add_argument("--timestamp_col", type=str, default=None, help="Column name for timestamps")
 
     # Process Arguments
-    parser.add_argument(
-        "--download_only",
-        action="store_true",
-        help="All processing arguments will be ignored",
-    )
+    parser.add_argument("--skip_process", action="store_true", help="All processing arguments will be ignored")
     parser.add_argument("--process_download", action="store_true", help="Process videos while downloading")
-    parser.add_argument("--fps", type=int, default=8, help="Frames per second for the output video")
-    parser.add_argument(
-        "--size",
-        type=int,
-        default=512,
-        help="Size of the smaller dimension of the output video",
-    )
-    parser.add_argument(
-        "--max_size",
-        type=int,
-        default=None,
-        help="Maximum size of the smaller dimension of the output video",
-    )
-    parser.add_argument(
-        "--center_crop",
-        action="store_true",
-        help="Center crop the video to the specified size",
-        default=False,
-    )
-    parser.add_argument("--quality", type=int, default=5, help="Quality of the output video")
+    parser.add_argument("--size", type=int, default=512, help="Size of the smaller dimension of the output video")
+    parser.add_argument("--max_size", type=int, default=None, help="Maximum size of the smaller dimension of the output video")
+    parser.add_argument("--resize_mode", type=str, default="shortest", help="Mode for resizing the video")
     parser.add_argument("--crf", type=int, default=23, help="CRF value for the output video")
+    parser.add_argument("--fps", type=int, default=24, help="Frames per second for the output video")
 
     # Writer Arguments
     parser.add_argument("--writer", type=str, default="file", help="Writer to use for saving videos")
@@ -83,42 +64,40 @@ def get_args():
     parser.add_argument("--world_size", type=int, default=1, help="Total number of nodes")
 
     # Upload Arguments
-    parser.add_argument(
-        "--upload_hf",
-        action="store_true",
-        help="Upload the downloaded videos to a cloud storage",
-        default=False,
-    )
+    parser.add_argument("--upload_hf", action="store_true", help="Upload the downloaded videos to a cloud storage", default=False)
     parser.add_argument("--repo_id", type=str, help="Repository ID for the cloud storage")
-    parser.add_argument(
-        "--upload_s3",
-        action="store_true",
-        help="Upload the downloaded videos to an S3 bucket",
-        default=False,
-    )
+    parser.add_argument("--upload_s3", action="store_true", help="Upload the downloaded videos to an S3 bucket", default=False)
     parser.add_argument("--bucket", type=str, help="Bucket name for the S3 storage")
-    parser.add_argument(
-        "--delete_local",
-        action="store_true",
-        help="Delete the local videos after uploading",
-        default=False,
-    )
+    parser.add_argument("--delete_local", action="store_true", help="Delete the local videos after uploading", default=False)
 
     # Debug Arguments
-    parser.add_argument(
-        "--profile",
-        action="store_true",
-        help="Profile the download process",
-        default=False,
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Dry run the download process",
-        default=False,
-    )
+    parser.add_argument("--profile", action="store_true", help="Profile the download process", default=False)
+    parser.add_argument("--debug", action="store_true", help="Dry run the download process", default=False)
 
     return parser.parse_known_args()[0]
+
+
+def get_process_args(args):
+    if args.media == "video":
+        process_args = VideoProcessArgs(
+            skip_process=args.skip_process,
+            size=args.size,
+            max_size=args.max_size,
+            resize_mode=args.resize_mode,
+            crf=args.crf,
+            fps=args.fps,
+        )
+    elif args.media == "image":
+        process_args = ImageProcessArgs(
+            skip_process=args.skip_process,
+            size=args.size,
+            max_size=args.max_size,
+            resize_mode=args.resize_mode,
+        )
+    else:
+        raise ValueError(f"Unknown media type: {args.media}")
+
+    return process_args
 
 
 def main():
@@ -128,14 +107,6 @@ def main():
 
     setup_logger_loguru(filename=args.log_file, logger=logger)
 
-    if args.process_download:
-        assert args.download_only, "Please set args.download_only=True to disable processing *after* downloading"
-        if args.num_threads * args.num_processes > 128:
-            print("Please set num_threads * num_processes <= 128")
-            args.num_threads = max(128 // args.num_processes, 1)
-            print(f"Setting num_threads to {args.num_threads}")
-        
-    
     # if args.timestamp_col is not None:
     #     logger.info("Forced to set args.download_only and args.process_download to True when using timestamp_col")
     #     args.download_only = True
@@ -154,16 +125,7 @@ def main():
         world_size=args.world_size,
     )
 
-    process_args = ProcessArguments(
-        disabled=args.download_only,
-        process_download=args.process_download,
-        fps=args.fps,
-        size=args.size,
-        max_size=args.max_size,
-        center_crop=args.center_crop,
-        quality=args.quality,
-        crf=args.crf,
-    )
+    process_args = get_process_args(args)
 
     download(
         media=args.media,
@@ -184,7 +146,7 @@ def main():
         delete_local=args.delete_local,
         # debug
         profile=args.profile,
-        dry_run=args.dry_run,
+        debug=args.debug,
     )
 
 

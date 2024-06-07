@@ -30,6 +30,7 @@ os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 from .writer import BufferedTextWriter, get_writer
 from .sharder import Sharder
 from .utils import shardid2name, safe_open
+from .process import ImageProcessArgs, VideoProcessArgs, FFmpegProcessor, CV2Processor
 
 from kn_util.data.video import download_youtube_as_bytes, read_frames_decord
 from kn_util.data.video.download import StorageLogger
@@ -38,31 +39,18 @@ from kn_util.utils.download import MultiThreadDownloaderInMem
 from kn_util.utils.error import SuppressStdoutStderr
 from kn_util.utils.system import run_cmd, force_delete_dir, clear_process_dir
 from kn_util.tools.lfs import upload_files
-from kn_util.tools.rsync import RsyncTool
 
 
-@dataclass
-class ProcessArguments:
-    disabled: bool = False
-    process_download: bool = False
-    fps: int = 8
-    size: int = 512
-    max_size: int = 512
-    center_crop: bool = False
-    quality: int = 5
-    crf: int = 7
+def _download_single_youtube(url, size):
+    # use a fake logger to suppress output and capture error
+    storage_logger = StorageLogger()
 
+    # default video format from video2dataset
+    # https://github.com/iejMac/video2dataset/blob/main/video2dataset/data_reader.py
+    video_format = f"wv*[height>={size}][ext=mp4]/" f"w[height>={size}][ext=mp4]/" "bv/b[ext=mp4]"
+    video_bytes, errorcode = download_youtube_as_bytes(url, video_format=video_format, logger=storage_logger)
 
-# def _download_single_youtube(url, size, timestamp):
-#     # use a fake logger to suppress output and capture error
-#     storage_logger = StorageLogger()
-
-#     # default video format from video2dataset
-#     # https://github.com/iejMac/video2dataset/blob/main/video2dataset/data_reader.py
-#     video_format = f"wv*[height>={size}][ext=mp4]/" f"w[height>={size}][ext=mp4]/" "bv/b[ext=mp4]"
-#     video_bytes, errorcode = download_youtube_as_bytes(url, video_format=video_format, logger=storage_logger)
-
-#     return video_bytes, errorcode, storage_logger.storage["error"]
+    return video_bytes, errorcode, storage_logger.storage["error"]
 
 
 def _download_single_direct(url):
@@ -106,10 +94,10 @@ def _get_target_size(orig_size, size, mode="shortest", divisible_by=1):
     return target_size
 
 
-def _download_single_ffmpeg(url, timestamp=None, orig_size=None, process_args=None, persistent_http=False):
+def _download_single_ffmpeg(url, timestamp=None):
     try:
         with tempfile.NamedTemporaryFile(suffix=".mp4") as f:
-            output_kwargs = []
+            output_kwargs = ["-c copy"]
             if timestamp is not None:
                 # st, ed = parse_timestamps(timestamp)
                 st, ed = timestamp.split("-")
@@ -117,13 +105,8 @@ def _download_single_ffmpeg(url, timestamp=None, orig_size=None, process_args=No
 
             output_kwargs = " ".join(output_kwargs)
 
-            if process_args.process_download:
-                size = _get_target_size(orig_size, process_args.size, divisible_by=2)
-                output_kwargs += f" -vf scale={size[0]}:{size[1]} -crf {process_args.crf} -codec:v libx264 -pix_fmt yuv420p -f mp4"
-
-            global_options = "-hide_banner -loglevel error -y"
-            if persistent_http:
-                global_options += " -http_persistent 0"
+            global_options = "-hide_banner -loglevel error -y "
+            global_options += " -http_persistent 1"
 
             ff = FFmpeg(
                 inputs={url: None},
@@ -141,7 +124,7 @@ def _download_single_ffmpeg(url, timestamp=None, orig_size=None, process_args=No
         return None, 1, str(e)
 
 
-def download_single(url, size, semaphore, process_args=None, timestamp=None, media="video"):
+def download_single(url, size, semaphore, timestamp=None, media="video"):
     _bytes = None
     errorcode = 0
     error_str = None
@@ -150,7 +133,6 @@ def download_single(url, size, semaphore, process_args=None, timestamp=None, med
     try:
         if media == "video":
             if not (url.endswith(".mp4") or url.endswith(".avi") or url.endswith(".mkv")):
-                # default video format from video2dataset
                 # https://github.com/iejMac/video2dataset/blob/main/video2dataset/data_reader.py
                 video_format = f"wv*[height>={size}][ext=mp4]/" f"w[height>={size}][ext=mp4]/" "bv/b[ext=mp4]"
                 # https://stackoverflow.com/questions/73673489/how-to-pass-get-url-flag-to-youtube-dl-or-yt-dlp-when-embedded-in-code
@@ -160,18 +142,18 @@ def download_single(url, size, semaphore, process_args=None, timestamp=None, med
                     "forceurl": True,
                     "format": video_format,
                 }
-                with yt_dlp.YoutubeDL(options) as ydl:
-                    info = ydl.extract_info(url, download=False)
-                    if "entries" in info:
-                        info = info["entries"][0]
-                    url = info["url"]
-                    orig_size = (info["width"], info["height"])
-                persistent_http = True
-            else:
-                orig_size = _get_online_video_size(url)
-                persistent_http = False
+                if timestamp is not None:
+                    with yt_dlp.YoutubeDL(options) as ydl:
+                        info = ydl.extract_info(url, download=False)
+                        if "entries" in info:
+                            info = info["entries"][0]
+                        url = info["url"]
 
-            _bytes, errorcode, error_str = _download_single_ffmpeg(url, timestamp, orig_size, process_args, persistent_http=persistent_http)
+                    _bytes, errorcode, error_str = _download_single_ffmpeg(url, timestamp)
+                else:
+                    _bytes, errorcode, error_str = _download_single_youtube(url, size)
+            else:
+                _bytes, errorcode, error_str = _download_single_direct(url)
 
         elif media == "image":
             _bytes, errorcode, error_str = _download_single_direct(url)
@@ -191,7 +173,6 @@ def download_generator(
     # download args
     size=360,
     media="video",
-    process_args=None,
     # parallel
     num_threads=16,
     semaphore_limit=32,
@@ -208,7 +189,6 @@ def download_generator(
             timestamp=timestamp,
             media=media,
             semaphore=semaphore,
-            process_args=process_args,
         )
         future._input = dict(meta=meta, id=_id, url=url, timestamp=timestamp, retry_cnt=retry_cnt)
         return future
@@ -270,8 +250,7 @@ def download_shard(
     meta_shard,
     # rank
     rank,
-    # process arguments
-    process_args: ProcessArguments,
+    process_args: ImageProcessArgs,
     # write arguments
     writer,
     output_dir,
@@ -284,6 +263,7 @@ def download_shard(
     message_queue=None,
     # debug
     profile=False,
+    debug=False,
 ):
     os.makedirs(osp.join(output_dir, ".meta"), exist_ok=True)
     error_log = osp.join(output_dir, ".meta", f"{shard_id}.error")
@@ -305,17 +285,20 @@ def download_shard(
     )
 
     # =================== DEBUG ======================
-    # for i in range(total):
-    #     video_bytes, errorcode, msg = download_single(
-    #         url=url_shard[i],
-    #         timestamp=timestamp_shard[i],
-    #         size=360,
-    #         semaphore=Semaphore(1),
-    #         media=media,
-    #         process_args=process_args,
-    #     )
-    #     byte_writer.write(key=id_shard[i], array=video_bytes, fmt="mp4")
-    #     import ipdb; ipdb.set_trace()
+    if debug:
+        for i in range(total):
+            video_bytes, errorcode, msg = download_single(
+                url=url_shard[i],
+                timestamp=timestamp_shard[i],
+                size=360,
+                semaphore=Semaphore(1),
+                media=media,
+                process_args=process_args,
+            )
+            byte_writer.write(key=id_shard[i], array=video_bytes, fmt="mp4")
+            import ipdb
+
+            ipdb.set_trace()
     # ================================================
 
     id_shard, url_shard, timestamp_shard, meta_shard = filter_shard(
@@ -330,50 +313,33 @@ def download_shard(
         timestamp_shard=timestamp_shard,
         meta_shard=meta_shard,
         media=media,
-        process_args=process_args,
         num_threads=num_threads,
         semaphore_limit=semaphore_limit,
         max_retries=max_retries,
     )
 
-    st = time.time()
+    if media == "video":
+        processor = FFmpegProcessor(process_args=process_args)
+    elif media == "image":
+        processor = CV2Processor(process_args=process_args)
+    else:
+        raise ValueError(f"Invalid media type: {media}")
 
-    for _id, _bytes, errorcode in download_gen:
-        if profile:
-            logger.info(f"Downloaded {_id} in {time.time() - st:.2f}s")
-            st = time.time()
+    for _id, byte_stream, errorcode in download_gen:
 
         if errorcode != 0:
             continue
 
-        # ======================== Process Video ========================
         if media == "video":
             try:
-                if process_args.disabled:
-                    byte_writer.write(key=_id, array=_bytes, fmt="mp4")
+                if process_args.skip_process:
+                    byte_writer.write(key=_id, array=byte_stream, fmt="mp4")
                 else:
-                    frames, video_meta = read_frames_decord(
-                        _bytes,
-                        fps=process_args.fps,
-                        size=process_args.size,
-                        max_size=process_args.max_size,
-                        is_bytes=True,
-                        output_format="thwc",
-                        return_meta=True,
-                    )
-
-                    if profile:
-                        logger.info(f"Processed {_id} in {time.time() - st:.2f}s")
-                        st = time.time()
-
-                    # write video
-                    byte_writer.write(key=_id, array=frames, video_meta=video_meta)
+                    byte_stream = processor(byte_stream)
+                    byte_writer.write(key=_id, array=byte_stream, fmt="mp4")
 
                 success += 1
                 message_queue.put(("PROGRESS", shard_id, 1))
-
-                if profile:
-                    logger.info(f"Written {_id} in {time.time() - st:.2f}s")
 
                 # vid_writer.write(vid)
             except Exception as e:
@@ -381,22 +347,12 @@ def download_shard(
                 continue
 
         elif media == "image":
-            transforms = []
-            transforms.append(IT.Resize(size=process_args.size, max_size=process_args.max_size))
-            if process_args.center_crop:
-                transforms.append(IT.CenterCrop(size=process_args.size))
-            transforms = IT.Compose(transforms)
-
             try:
-                array = Image.open(io.BytesIO(_bytes)).convert("RGB")
-                array = torch.from_numpy(np.array(array))
-                array = rearrange(array, "h w c -> c h w")
-                array = transforms(array)
-                array = array.numpy()
-                array = rearrange(array, "c h w -> h w c")
-
-                # write video
-                byte_writer.write(key=_id, array=array, fmt="jpeg")
+                if process_args.skip_process:
+                    byte_writer.write(key=_id, array=byte_stream, fmt="jpeg")
+                else:
+                    byte_stream = processor(byte_stream)
+                    byte_writer.write(key=_id, array=byte_stream, fmt="jpeg")
 
                 success += 1
                 message_queue.put(("PROGRESS", shard_id, 1))
@@ -453,7 +409,7 @@ def download(
     media: str,
     sharder: Sharder,
     output_dir,
-    process_args: ProcessArguments,
+    process_args: ImageProcessArgs,
     writer="file",
     num_processes=16,
     rank=0,
@@ -469,11 +425,8 @@ def download(
     delete_local=False,
     # debug
     profile=False,
-    dry_run=False,
+    debug=False,
 ):
-    global dry_run_global
-    dry_run_global = dry_run
-
     manager = multiprocessing.Manager()
     message_queue = manager.Queue()
 
@@ -517,10 +470,12 @@ def download(
     local_shard_ids = [sharder.get_local_id(i) for i in global_shard_ids if i not in downloaded_shard_ids]
 
     # ======================== DEBUG ========================
-    # launch_job(local_shard_ids[0])
-    # import ipdb
+    if debug:
+        for local_shard_id in local_shard_ids:
+            launch_job(local_shard_id)
+            import ipdb
 
-    # ipdb.set_trace()
+            ipdb.set_trace()
     # ======================================================
 
     not_done = set()
