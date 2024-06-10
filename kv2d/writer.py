@@ -9,11 +9,22 @@ import time
 from loguru import logger
 from PIL import Image
 import json
+from dataclasses import dataclass
 
 from .utils import safe_open
 
 from kn_util.utils.system import run_cmd, force_delete_dir
 from kn_util.data.video import save_video_imageio, array_to_video_bytes, save_video_ffmpeg
+
+
+@dataclass
+class UploadArgs:
+    upload_hf: bool = False
+    repo_id: str = ""
+    upload_s3: bool = False
+    endpoint_url: str = ""
+    bucket: str = ""
+    delete_local: bool = False
 
 
 def is_tensor(x):
@@ -44,28 +55,35 @@ class TarWriter:
 
 
 class FileWriter:
-    def __init__(self, cache_dir, process_args, media="video"):
+    def __init__(self, cache_dir, process_args, upload_args, media="video"):
         self.cache_dir = cache_dir
         self.media = media
         os.makedirs(self.cache_dir, exist_ok=True)
         self.process_args = process_args
+        self.upload_args = upload_args
+
+    def upload(self):
+        raise NotImplementedError
 
     def write(self, key, array, fmt="mp4", video_meta=None):
+        assert isinstance(array, (bytearray, bytes)), f"Invalid array type: {type(array)}"
         if isinstance(array, (bytearray, bytes)):
             with open(osp.join(self.cache_dir, f"{key}.{fmt}"), "wb") as f:
                 f.write(array)
             return
 
-        cache_file = osp.join(self.cache_dir, f"{key}.{fmt}")
-        with tempfile.NamedTemporaryFile(suffix="." + fmt, delete=False) as f:
-            if self.media == "video":
-                save_video_ffmpeg(array, f.name, fps=video_meta["fps"], crf=self.process_args.crf)
-                # save_video_imageio(array, f.name, fps=video_meta["fps"], quality=self.quality)
-            elif self.media == "image":
-                Image.fromarray(array).save(f.name)
-            else:
-                raise ValueError(f"Invalid media type: {self.media}")
-            run_cmd(f"mv {f.name} {cache_file}")
+        # ! Deprecated
+        if False:
+            cache_file = osp.join(self.cache_dir, f"{key}.{fmt}")
+            with tempfile.NamedTemporaryFile(suffix="." + fmt, delete=False) as f:
+                if self.media == "video":
+                    save_video_ffmpeg(array, f.name, fps=video_meta["fps"], crf=self.process_args.crf)
+                    # save_video_imageio(array, f.name, fps=video_meta["fps"], quality=self.quality)
+                elif self.media == "image":
+                    Image.fromarray(array).save(f.name)
+                else:
+                    raise ValueError(f"Invalid media type: {self.media}")
+                run_cmd(f"mv {f.name} {cache_file}")
 
     @property
     def downloaded_ids(self):
@@ -76,15 +94,56 @@ class FileWriter:
             downloaded_ids.add(key)
 
         return downloaded_ids
-    
+
     def close(self):
         pass
 
 
 class CachedTarWriter(FileWriter):
-    def __init__(self, tar_file, cache_dir, process_args, media="video"):
-        super().__init__(cache_dir=cache_dir, media=media, process_args=process_args)
+    def __init__(self, tar_file, cache_dir, process_args, upload_args, media="video"):
+        super().__init__(cache_dir=cache_dir, media=media, process_args=process_args, upload_args=upload_args)
         self.tar_file = tar_file
+
+    def upload(self):
+        try:
+            popens = []
+            if self.upload_args.upload_hf:
+                # while osp.exists(f"~repo"):
+                #     time.sleep(1)
+
+                # run_cmd(f"GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/datasets/{self.upload_args.repo_id} ~repo", async_cmd=False)
+                # run_cmd(f"cp {self.tar_file} ~repo", async_cmd=False)
+                # run_cmd(
+                #     f"cd ~repo && git lfs track {tar_filename} && git add {tar_filename} && git commit --amend -m 'add files' && git push -f",
+                #     async_cmd=False,
+                # )
+                # run_cmd(f"rm -rf ~repo", async_cmd=False)
+                # from huggingface_hub.hf_api import HfApi
+                # hf = HfApi()
+                # hf.upload_file(path_in_repo=tar_filename, path_or_fileobj=self.tar_file, repo_id=self.upload_args.repo_id, repo_type="dataset")
+                tar_filename = osp.basename(self.tar_file)
+                cmd = f"HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli upload --repo-type dataset {self.upload_args.repo_id} {self.tar_file}"
+                logger.info(cmd)
+                popen = run_cmd(cmd, async_cmd=True)
+                popens += [popen]
+                logger.info(f"{self.tar_file} uploaded to {self.upload_args.repo_id}")
+
+            if self.upload_args.upload_s3:
+                popen = run_cmd(
+                    f"aws s3 cp {self.tar_file} s3://sg-sail-home-wangjing/home/{self.upload_args.bucket} --endpoint-url {self.upload_args.endpoint_url}",
+                    async_cmd=True,
+                )
+                popens += [popen]
+                logger.info(f"{self.tar_file} uploaded to {self.upload_args.bucket} via S3")
+
+            for popen in popens:
+                popen.wait()
+
+            if self.upload_args.delete_local:
+                run_cmd(f"rm -rf {self.tar_file}", async_cmd=False)
+                logger.info(f"{self.tar_file} deleted")
+        except:
+            logger.error(f"Failed to upload {self.tar_file}")
 
     def close(self):
         cur_dir = osp.dirname(self.tar_file)
@@ -102,23 +161,25 @@ class CachedTarWriter(FileWriter):
                 writer.write({"__key__": key, fmt: video_bytes})
                 keys.append(key)
 
+        self.upload()
+        run_cmd(f"rm -rf {self.cache_dir}", async_cmd=False)
+
         with safe_open(key_file, "a") as f:
             item = {"tar": tar_filename, "keys": keys}
             json_str = json.dumps(item)
             f.write(json_str + "\n")
 
-        run_cmd(f"rm -rf {self.cache_dir}", async_cmd=False)
 
-
-def get_writer(writer, output_dir, shard_id, process_args, media="video"):
+def get_writer(writer, output_dir, shard_id, process_args, upload_args, media="video"):
     from .utils import logits
 
     cache_dir = osp.join(output_dir, f"cache.{shard_id:0{logits}d}")
     tar_file = osp.join(output_dir, f"{shard_id:0{logits}d}.tar")
     if writer == "file":
-        return FileWriter(cache_dir=cache_dir, process_args=process_args, media=media)
+        logger.warning("Using file writer, upload_args will be ignored")
+        return FileWriter(cache_dir=cache_dir, process_args=process_args, upload_args=upload_args, media=media)
     elif writer == "tar":
-        return CachedTarWriter(tar_file, cache_dir=cache_dir, media=media, process_args=process_args)
+        return CachedTarWriter(tar_file, cache_dir=cache_dir, media=media, process_args=process_args, upload_args=upload_args)
     else:
         raise ValueError(f"Invalid writer: {writer}")
 

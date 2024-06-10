@@ -3,9 +3,11 @@ from kn_util.utils.io import load_csv
 import os
 import os.path as osp
 from loguru import logger
+
 from .download import download
 from .sharder import Sharder, ReadArguments
 from .process import VideoProcessArgs, ImageProcessArgs
+from .writer import UploadArgs
 
 
 def get_args():
@@ -67,7 +69,7 @@ def get_args():
     parser.add_argument("--upload_hf", action="store_true", help="Upload the downloaded videos to a cloud storage", default=False)
     parser.add_argument("--repo_id", type=str, help="Repository ID for the cloud storage")
     parser.add_argument("--upload_s3", action="store_true", help="Upload the downloaded videos to an S3 bucket", default=False)
-    parser.add_argument("--bucket", type=str, help="Bucket name for the S3 storage")
+    parser.add_argument("--bucket", type=str, help="Path to the S3 bucket")
     parser.add_argument("--delete_local", action="store_true", help="Delete the local videos after uploading", default=False)
 
     # Debug Arguments
@@ -100,6 +102,23 @@ def get_process_args(args):
     return process_args
 
 
+def get_upload_args(args):
+    if args.upload_hf:
+        try:
+            import hf_transfer
+        except:
+            raise ImportError("Please install hf-transfer to use the Hugging Face upload feature")
+
+    return UploadArgs(
+        upload_hf=args.upload_hf,
+        repo_id=args.repo_id,
+        upload_s3=args.upload_s3,
+        bucket=args.bucket,
+        endpoint_url=os.environ["AWS_ENDPOINT_URL"],
+        delete_local=args.delete_local,
+    )
+
+
 def main():
     from kn_util.utils.logger import setup_logger_loguru
 
@@ -126,24 +145,20 @@ def main():
     )
 
     process_args = get_process_args(args)
+    upload_args = get_upload_args(args)
 
     download(
         media=args.media,
         sharder=sharder,
         rank=args.rank,
         process_args=process_args,
+        upload_args=upload_args,
         writer=args.writer,
         output_dir=args.output_dir,
         num_processes=args.num_processes,
         num_threads=args.num_threads,
         semaphore_limit=args.semaphore_limit,
         max_retries=args.max_retries,
-        # upload
-        upload_hf=args.upload_hf,
-        repo_id=args.repo_id,
-        upload_s3=args.upload_s3,
-        bucket=args.bucket,
-        delete_local=args.delete_local,
         # debug
         profile=args.profile,
         debug=args.debug,

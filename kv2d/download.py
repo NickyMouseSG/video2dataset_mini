@@ -27,7 +27,7 @@ from ffmpy import FFmpeg, FFprobe
 
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
-from .writer import BufferedTextWriter, get_writer
+from .writer import BufferedTextWriter, get_writer, UploadArgs
 from .sharder import Sharder
 from .utils import shardid2name, safe_open
 from .process import ImageProcessArgs, VideoProcessArgs, FFmpegProcessor, CV2Processor
@@ -253,9 +253,9 @@ def download_shard(
     id_shard,
     timestamp_shard,
     meta_shard,
-    # rank
     rank,
     process_args: ImageProcessArgs,
+    upload_args: UploadArgs,
     # write arguments
     writer,
     output_dir,
@@ -287,6 +287,7 @@ def download_shard(
         shard_id=shard_id,
         media=media,
         process_args=process_args,
+        upload_args=upload_args,
     )
 
     id_shard, url_shard, timestamp_shard, meta_shard = filter_shard(
@@ -314,6 +315,9 @@ def download_shard(
         raise ValueError(f"Invalid media type: {media}")
 
     def process(_id, byte_stream, errorcode):
+        # or message_queue won't work
+        nonlocal message_queue, success
+
         if errorcode != 0:
             return
 
@@ -366,6 +370,7 @@ def download_shard(
         process(_id, byte_stream, errorcode)
 
     byte_writer.close()
+
     message_queue.put(("END", shard_id))
 
     return shard_id, success, total
@@ -405,6 +410,8 @@ def process_message_queue(message_queue, progress, mapping):
             task_id = mapping[shard_id]
             progress.remove_task(task_id)
             mapping.pop(shard_id)
+    
+    progress.refresh()
 
 
 def download(
@@ -412,6 +419,7 @@ def download(
     sharder: Sharder,
     output_dir,
     process_args: ImageProcessArgs,
+    upload_args: UploadArgs,
     writer="file",
     num_processes=16,
     rank=0,
@@ -419,12 +427,6 @@ def download(
     num_threads=32,
     max_retries=3,
     semaphore_limit=128,
-    # upload,
-    upload_hf=False,
-    repo_id=None,
-    upload_s3=False,
-    bucket=None,
-    delete_local=False,
     # debug
     profile=False,
     debug=False,
@@ -444,6 +446,7 @@ def download(
             rank=rank,
             output_dir=output_dir,
             process_args=process_args,
+            upload_args=upload_args,
             writer=writer,
             shard_id=global_shard_id,
             max_retries=max_retries,
@@ -517,32 +520,3 @@ def download(
             ]
         )
     )
-
-    tar_filenames = [shardid2name(_) + ".tar" for _ in global_shard_ids]
-    tar_paths = [osp.join(output_dir, _) for _ in tar_filenames]
-
-    if upload_hf:
-        while osp.isdir("~repo"):
-            # this means some other ranks is uploading
-            time.sleep(1)
-
-        os.system(f"GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/datasets/k-nick/{repo_id}.git ~repo")
-        os.system("mv " + " ".join(tar_paths) + " ~repo")
-        cwd = os.getcwd()
-        os.chdir("~repo")
-        upload_files(files=tar_filenames, batch_size=30)
-        clear_process_dir(".")
-        os.system("mv " + " ".join(tar_filenames) + f"{cwd}/{output_dir}")
-        os.chdir(cwd)
-        os.system(f"rm -rf ~repo")
-
-    if upload_s3:
-        target_s3_bucket = f"/s3/{bucket}"
-        os.makedirs(target_s3_bucket, exist_ok=True)
-        # RsyncTool.launch_rsync(from_addr=output_dir, to_addr=target_s3_bucket, async_dir=True, path_filter=lambda x: x.endswith(".tar"))
-        os.system("scp " + " ".join(tar_paths) + f" {target_s3_bucket}")
-        logger.info(f"Uploaded {len(tar_paths)} files to {target_s3_bucket}")
-
-    if delete_local:
-        clear_process_dir(output_dir)
-        os.system(f"rm -rf " + " ".join(tar_paths))

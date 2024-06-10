@@ -84,7 +84,8 @@ class Sharder:
             yield self.read_single(input_file, read_args)
 
     def write_shards_single(self, df, shard_size=1000, shard_dir=".", shard_idx_offset=0):
-        num_shards = (len(df) + shard_size - 1) // shard_size
+        num_samples = len(df) - 1
+        num_shards = (num_samples + shard_size - 1) // shard_size
         num_logits = len(str(num_shards))
 
         def write_shard(df_shard, shard_id, shard_dir):
@@ -104,8 +105,9 @@ class Sharder:
             if i < num_shards
         ]
         self.local_shard_ids = local_shard_ids
-        shard_spans = [(i * shard_size, min((i + 1) * shard_size, len(df))) for i in local_shard_ids]
-        local_df_shards = [df.slice(start, end - start + 1) for start, end in shard_spans]
+        shard_spans = [(1 + i * shard_size, min(1 + (i + 1) * shard_size, len(df))) for i in local_shard_ids]
+        # here 1+ is used to skip the header
+        local_df_shards = [df.slice(start, end - start) for start, end in shard_spans]
 
         # prevent slice df in multiple threads, not safe
         shard_files = map_async_with_thread(
@@ -117,7 +119,7 @@ class Sharder:
             ),
             verbose=False,
         )
-        logger.info(f"Input data ({len(df)} rows) has been sharded into {len(local_shard_ids)} shards in rank {self.rank_id}.")
+        logger.info(f"Input data ({num_samples} rows) has been sharded into {len(local_shard_ids)} shards in rank {self.rank_id}.")
 
         return shard_files, num_shards, len(df)
 
@@ -175,10 +177,11 @@ class Sharder:
         vid = shard_df[id_col].to_pylist()
         timestamps = shard_df[timestamp_col].to_pylist() if timestamp_col else None
 
-        if self.read_args.headers:
-            url = url[1:]
-            vid = vid[1:]
-            timestamps = timestamps[1:] if timestamps else None
+        # header has been skip before!! Don't skip again
+        # if self.read_args.headers:
+        #     url = url[1:]
+        #     vid = vid[1:]
+        #     timestamps = timestamps[1:] if timestamps else None
 
         meta = [{k: shard_df[k][i] for k in column_names} for i in range(shard_size)]
 
