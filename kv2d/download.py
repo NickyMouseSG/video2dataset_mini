@@ -133,21 +133,23 @@ def download_single(url, size, semaphore, timestamp=None, media="video"):
     try:
         if media == "video":
             if not (url.endswith(".mp4") or url.endswith(".avi") or url.endswith(".mkv")):
-                # https://github.com/iejMac/video2dataset/blob/main/video2dataset/data_reader.py
-                video_format = f"wv*[height>={size}][ext=mp4]/" f"w[height>={size}][ext=mp4]/" "bv/b[ext=mp4]"
-                # https://stackoverflow.com/questions/73673489/how-to-pass-get-url-flag-to-youtube-dl-or-yt-dlp-when-embedded-in-code
-                options = {
-                    "quiet": True,
-                    "simulate": True,
-                    "forceurl": True,
-                    "format": video_format,
-                }
                 if timestamp is not None:
+                    # https://github.com/iejMac/video2dataset/blob/main/video2dataset/data_reader.py
+                    video_format = f"wv*[height>={size}][ext=mp4]/" f"w[height>={size}][ext=mp4]/" "bv/b[ext=mp4]"
+                    # https://stackoverflow.com/questions/73673489/how-to-pass-get-url-flag-to-youtube-dl-or-yt-dlp-when-embedded-in-code
+                    options = {
+                        "quiet": True,
+                        "simulate": True,
+                        "forceurl": True,
+                        "format": video_format,
+                    }
+                    import ipdb; ipdb.set_trace()
                     with yt_dlp.YoutubeDL(options) as ydl:
                         info = ydl.extract_info(url, download=False)
                         if "entries" in info:
                             info = info["entries"][0]
                         url = info["url"]
+                    
 
                     _bytes, errorcode, error_str = _download_single_ffmpeg(url, timestamp)
                 else:
@@ -293,7 +295,6 @@ def download_shard(
                 size=360,
                 semaphore=Semaphore(1),
                 media=media,
-                process_args=process_args,
             )
             byte_writer.write(key=id_shard[i], array=video_bytes, fmt="mp4")
             import ipdb
@@ -449,6 +450,7 @@ def download(
             num_threads=num_threads,
             message_queue=message_queue,
             profile=profile,
+            debug=debug,
         )
         return global_shard_id, success, total
 
