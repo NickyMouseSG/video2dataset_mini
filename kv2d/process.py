@@ -136,7 +136,7 @@ class FFmpegProcessor:
                     ]
                 )
             },
-            global_options=" ".join(["-hide_banner", "-loglevel error", "-y"]),
+            global_options=" ".join(["-hide_banner", "-loglevel error", "-y", "-threads 4"]),
         )
         popen_output = run_cmd(ff.cmd)
         popen_output.check_returncode()

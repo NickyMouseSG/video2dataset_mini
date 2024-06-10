@@ -12,7 +12,7 @@ import json
 
 from .utils import safe_open
 
-from kn_util.utils.system import run_cmd
+from kn_util.utils.system import run_cmd, force_delete_dir
 from kn_util.data.video import save_video_imageio, array_to_video_bytes, save_video_ffmpeg
 
 

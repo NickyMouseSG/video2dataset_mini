@@ -143,13 +143,11 @@ def download_single(url, size, semaphore, timestamp=None, media="video"):
                         "forceurl": True,
                         "format": video_format,
                     }
-                    import ipdb; ipdb.set_trace()
                     with yt_dlp.YoutubeDL(options) as ydl:
                         info = ydl.extract_info(url, download=False)
                         if "entries" in info:
                             info = info["entries"][0]
                         url = info["url"]
-                    
 
                     _bytes, errorcode, error_str = _download_single_ffmpeg(url, timestamp)
                 else:
@@ -287,19 +285,19 @@ def download_shard(
     )
 
     # =================== DEBUG ======================
-    if debug:
-        for i in range(total):
-            video_bytes, errorcode, msg = download_single(
-                url=url_shard[i],
-                timestamp=timestamp_shard[i],
-                size=360,
-                semaphore=Semaphore(1),
-                media=media,
-            )
-            byte_writer.write(key=id_shard[i], array=video_bytes, fmt="mp4")
-            import ipdb
+    # if debug:
+    #     for i in range(total):
+    #         video_bytes, errorcode, msg = download_single(
+    #             url=url_shard[i],
+    #             timestamp=timestamp_shard[i],
+    #             size=360,
+    #             semaphore=Semaphore(1),
+    #             media=media,
+    #         )
+    #         byte_writer.write(key=id_shard[i], array=video_bytes, fmt="mp4")
+    #         import ipdb
 
-            ipdb.set_trace()
+    #         ipdb.set_trace()
     # ================================================
 
     id_shard, url_shard, timestamp_shard, meta_shard = filter_shard(
@@ -361,8 +359,6 @@ def download_shard(
             except Exception as e:
                 error_writer.write("\t".join([_id, str(e)]))
                 continue
-
-        st = time.time()
 
     byte_writer.close()
     message_queue.put(("END", shard_id))
