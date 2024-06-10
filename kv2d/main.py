@@ -70,6 +70,7 @@ def get_args():
     parser.add_argument("--repo_id", type=str, help="Repository ID for the cloud storage")
     parser.add_argument("--upload_s3", action="store_true", help="Upload the downloaded videos to an S3 bucket", default=False)
     parser.add_argument("--bucket", type=str, help="Path to the S3 bucket")
+    parser.add_argument("--endpoint_url", type=str, help="Endpoint URL for the S3 bucket")
     parser.add_argument("--delete_local", action="store_true", help="Delete the local videos after uploading", default=False)
 
     # Debug Arguments
@@ -114,7 +115,7 @@ def get_upload_args(args):
         repo_id=args.repo_id,
         upload_s3=args.upload_s3,
         bucket=args.bucket,
-        endpoint_url=os.environ["AWS_ENDPOINT_URL"],
+        endpoint_url=os.environ.get("S3_ENDPOINT_URL", args.endpoint_url),
         delete_local=args.delete_local,
     )
 
