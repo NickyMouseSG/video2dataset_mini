@@ -41,14 +41,19 @@ from kn_util.utils.system import run_cmd, force_delete_dir, clear_process_dir
 from kn_util.tools.lfs import upload_files
 
 
-def _download_single_youtube(url, size):
+def _download_single_youtube(url, size=256, timestamp=None):
     # use a fake logger to suppress output and capture error
     storage_logger = StorageLogger()
 
     # default video format from video2dataset
     # https://github.com/iejMac/video2dataset/blob/main/video2dataset/data_reader.py
     video_format = f"wv*[height>={size}][ext=mp4]/" f"w[height>={size}][ext=mp4]/" "bv/b[ext=mp4]"
-    video_bytes, errorcode = download_youtube_as_bytes(url, video_format=video_format, logger=storage_logger)
+    video_bytes, errorcode = download_youtube_as_bytes(
+        url,
+        video_format=video_format,
+        logger=storage_logger,
+        timestamp=timestamp,
+    )
 
     return video_bytes, errorcode, storage_logger.storage["error"]
 
@@ -133,25 +138,26 @@ def download_single(url, size, semaphore, timestamp=None, media="video"):
     try:
         if media == "video":
             if not (url.endswith(".mp4") or url.endswith(".avi") or url.endswith(".mkv")):
-                if timestamp is not None:
-                    # https://github.com/iejMac/video2dataset/blob/main/video2dataset/data_reader.py
-                    video_format = f"wv*[height>={size}][ext=mp4]/" f"w[height>={size}][ext=mp4]/" "bv/b[ext=mp4]"
-                    # https://stackoverflow.com/questions/73673489/how-to-pass-get-url-flag-to-youtube-dl-or-yt-dlp-when-embedded-in-code
-                    options = {
-                        "quiet": True,
-                        "simulate": True,
-                        "forceurl": True,
-                        "format": video_format,
-                    }
-                    with yt_dlp.YoutubeDL(options) as ydl:
-                        info = ydl.extract_info(url, download=False)
-                        if "entries" in info:
-                            info = info["entries"][0]
-                        url = info["url"]
 
-                    _bytes, errorcode, error_str = _download_single_ffmpeg(url, timestamp)
-                else:
-                    _bytes, errorcode, error_str = _download_single_youtube(url, size)
+                # if timestamp is not None:
+                #     # https://github.com/iejMac/video2dataset/blob/main/video2dataset/data_reader.py
+                #     video_format = f"wv*[height>={size}][ext=mp4]/" f"w[height>={size}][ext=mp4]/" "bv/b[ext=mp4]"
+                #     # https://stackoverflow.com/questions/73673489/how-to-pass-get-url-flag-to-youtube-dl-or-yt-dlp-when-embedded-in-code
+                #     options = {
+                #         "quiet": True,
+                #         "simulate": True,
+                #         "forceurl": True,
+                #         "format": video_format,
+                #     }
+                #     import ipdb; ipdb.set_trace()
+                #     with yt_dlp.YoutubeDL(options) as ydl:
+                #         info = ydl.extract_info(url, download=False)
+                #         if "entries" in info:
+                #             info = info["entries"][0]
+                #         url = info["url"]
+                #     _bytes, errorcode, error_str = _download_single_ffmpeg(url, timestamp)
+                # else:
+                _bytes, errorcode, error_str = _download_single_youtube(url, size=size, timestamp=timestamp)
             else:
                 _bytes, errorcode, error_str = _download_single_direct(url)
 
@@ -285,6 +291,7 @@ def download_shard(
     )
 
     # =================== DEBUG ======================
+<<<<<<< HEAD
     # if debug:
     #     for i in range(total):
     #         video_bytes, errorcode, msg = download_single(
@@ -298,6 +305,18 @@ def download_shard(
     #         import ipdb
 
     #         ipdb.set_trace()
+=======
+    if debug:
+        for i in range(total):
+            video_bytes, errorcode, msg = download_single(
+                url=url_shard[i],
+                timestamp=timestamp_shard[i],
+                size=360,
+                semaphore=Semaphore(1),
+                media=media,
+            )
+            byte_writer.write(key=id_shard[i], array=video_bytes, fmt="mp4")
+>>>>>>> 088c2178a2f334da62093caa1d8ea7ee3b535960
     # ================================================
 
     id_shard, url_shard, timestamp_shard, meta_shard = filter_shard(
@@ -471,9 +490,6 @@ def download(
     if debug:
         for local_shard_id in local_shard_ids:
             launch_job(local_shard_id)
-            import ipdb
-
-            ipdb.set_trace()
     # ======================================================
 
     not_done = set()
