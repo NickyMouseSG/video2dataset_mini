@@ -76,6 +76,9 @@ class FileWriter:
             downloaded_ids.add(key)
 
         return downloaded_ids
+    
+    def close(self):
+        pass
 
 
 class CachedTarWriter(FileWriter):
