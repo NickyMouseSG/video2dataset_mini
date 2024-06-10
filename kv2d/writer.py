@@ -106,7 +106,6 @@ class CachedTarWriter(FileWriter):
 
     def upload(self):
         try:
-            popens = []
             if self.upload_args.upload_hf:
                 # while osp.exists(f"~repo"):
                 #     time.sleep(1)
@@ -124,20 +123,18 @@ class CachedTarWriter(FileWriter):
                 tar_filename = osp.basename(self.tar_file)
                 cmd = f"HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli upload --repo-type dataset {self.upload_args.repo_id} {self.tar_file}"
                 logger.info(cmd)
-                popen = run_cmd(cmd, async_cmd=True)
-                popens += [popen]
+                ret = run_cmd(cmd, async_cmd=False).ret
+                returncode = ret.returncode
+                assert returncode == 0, f"Failed to upload {self.tar_file}, error code: {ret.stderr}"
                 logger.info(f"{self.tar_file} uploaded to {self.upload_args.repo_id}")
 
             if self.upload_args.upload_s3:
-                popen = run_cmd(
+                run_cmd(
                     f"aws s3 cp {self.tar_file} s3://sg-sail-home-wangjing/home/{self.upload_args.bucket} --endpoint-url {self.upload_args.endpoint_url}",
-                    async_cmd=True,
+                    async_cmd=False,
                 )
-                popens += [popen]
+                assert returncode == 0, f"Failed to upload {self.tar_file}, error code: {ret.stderr}"
                 logger.info(f"{self.tar_file} uploaded to {self.upload_args.bucket} via S3")
-
-            for popen in popens:
-                popen.wait()
 
             if self.upload_args.delete_local:
                 run_cmd(f"rm -rf {self.tar_file}", async_cmd=False)
