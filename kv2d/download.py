@@ -138,7 +138,6 @@ def download_single(url, size, semaphore, timestamp=None, media="video"):
     try:
         if media == "video":
             if not (url.endswith(".mp4") or url.endswith(".avi") or url.endswith(".mkv")):
-
                 # if timestamp is not None:
                 #     # https://github.com/iejMac/video2dataset/blob/main/video2dataset/data_reader.py
                 #     video_format = f"wv*[height>={size}][ext=mp4]/" f"w[height>={size}][ext=mp4]/" "bv/b[ext=mp4]"
@@ -290,35 +289,6 @@ def download_shard(
         process_args=process_args,
     )
 
-    # =================== DEBUG ======================
-<<<<<<< HEAD
-    # if debug:
-    #     for i in range(total):
-    #         video_bytes, errorcode, msg = download_single(
-    #             url=url_shard[i],
-    #             timestamp=timestamp_shard[i],
-    #             size=360,
-    #             semaphore=Semaphore(1),
-    #             media=media,
-    #         )
-    #         byte_writer.write(key=id_shard[i], array=video_bytes, fmt="mp4")
-    #         import ipdb
-
-    #         ipdb.set_trace()
-=======
-    if debug:
-        for i in range(total):
-            video_bytes, errorcode, msg = download_single(
-                url=url_shard[i],
-                timestamp=timestamp_shard[i],
-                size=360,
-                semaphore=Semaphore(1),
-                media=media,
-            )
-            byte_writer.write(key=id_shard[i], array=video_bytes, fmt="mp4")
->>>>>>> 088c2178a2f334da62093caa1d8ea7ee3b535960
-    # ================================================
-
     id_shard, url_shard, timestamp_shard, meta_shard = filter_shard(
         id_shard, url_shard, timestamp_shard, meta_shard, byte_writer.downloaded_ids
     )
@@ -343,10 +313,9 @@ def download_shard(
     else:
         raise ValueError(f"Invalid media type: {media}")
 
-    for _id, byte_stream, errorcode in download_gen:
-
+    def process(_id, byte_stream, errorcode):
         if errorcode != 0:
-            continue
+            return
 
         if media == "video":
             try:
@@ -362,7 +331,7 @@ def download_shard(
                 # vid_writer.write(vid)
             except Exception as e:
                 error_writer.write("\t".join([_id, str(e)]))
-                continue
+                return
 
         elif media == "image":
             try:
@@ -377,7 +346,24 @@ def download_shard(
 
             except Exception as e:
                 error_writer.write("\t".join([_id, str(e)]))
-                continue
+                return
+
+    # =================== DEBUG ======================
+    if debug:
+        for i in range(total):
+            video_bytes, errorcode, msg = download_single(
+                url=url_shard[i],
+                timestamp=timestamp_shard[i],
+                size=360,
+                semaphore=Semaphore(1),
+                media=media,
+            )
+            _id = id_shard[i]
+            process(_id, video_bytes, errorcode)
+    # ================================================
+
+    for _id, byte_stream, errorcode in download_gen:
+        process(_id, byte_stream, errorcode)
 
     byte_writer.close()
     message_queue.put(("END", shard_id))
