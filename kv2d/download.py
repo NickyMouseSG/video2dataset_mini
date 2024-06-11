@@ -24,6 +24,8 @@ import sys
 from einops import rearrange
 import yt_dlp
 from ffmpy import FFmpeg, FFprobe
+from tqdm import tqdm
+from queue import Queue
 
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
@@ -354,7 +356,8 @@ def download_shard(
 
     # =================== DEBUG ======================
     if debug:
-        for i in range(total):
+        print(f"shard_id: {shard_id}")
+        for i in tqdm(range(len(url_shard))):
             video_bytes, errorcode, msg = download_single(
                 url=url_shard[i],
                 timestamp=timestamp_shard[i],
@@ -410,8 +413,42 @@ def process_message_queue(message_queue, progress, mapping):
             task_id = mapping[shard_id]
             progress.remove_task(task_id)
             mapping.pop(shard_id)
-    
+
     progress.refresh()
+
+
+def maybe_upload(writer, upload_args, upload_queue, upload_interval=10):
+    if upload_queue.qsize() < upload_interval or writer != "tar":
+        return
+
+    tar_files = []
+    while upload_queue.qsize() > 0:
+        tar_files.append(upload_queue.get())
+
+    if upload_args.upload_hf:
+        while not osp.exists("~repo"):
+            pass
+        run_cmd("GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/datasets/{upload_args.repo_id} ~repo", async_cmd=False)
+        run_cmd(f"cp -r {' '.join(tar_files)} ~repo", async_cmd=False)
+        _cwd = os.getcwd()
+        os.chdir("~repo")
+        upload_files(tar_files, batch_size=len(tar_files))
+        os.chdir(_cwd)
+        run_cmd("rm -rf ~repo", async_cmd=False)
+        logger.info(f"Uploaded to {upload_args.repo_id}")
+
+    if upload_args.upload_s3:
+        ret = run_cmd(
+            f"aws s3 cp {' '.join(tar_files)} s3://sg-sail-home-wangjing/home/{upload_args.bucket} --endpoint-url {upload_args.endpoint_url}",
+            async_cmd=False,
+        )
+        returncode = ret.returncode
+        assert returncode == 0, f"Failed to upload, error code: {ret.stderr}"
+        logger.info(f"Uploaded to {upload_args.bucket} via S3")
+
+    if upload_args.delete_local:
+        run_cmd(f"rm -rf {' '.join(tar_files)}", async_cmd=False)
+        logger.info(f"Deleted local files")
 
 
 def download(
@@ -435,6 +472,7 @@ def download(
     message_queue = manager.Queue()
 
     def launch_job(local_shard_id):
+
         url_shard, id_shard, timestamp_shard, meta_shard = sharder.fetch_shard(local_shard_id)
         global_shard_id = sharder.get_global_id(local_shard_id)
         _, success, total = download_shard(
@@ -490,6 +528,8 @@ def download(
     progress.start()
     task_mapping = {}
 
+    upload_queue = Queue()
+
     while len(not_done) > 0:
         done, not_done = apipe_wait(not_done, interval=3.0)
 
@@ -503,6 +543,7 @@ def download(
             global_shard_id, success, total = future.get()
             with safe_open(downloaded_shard_meta, "a") as f:
                 f.write("\t".join([str(global_shard_id), str(success), str(total)]) + "\n")
+                upload_queue.put(global_shard_id)
 
     progress.stop()
 

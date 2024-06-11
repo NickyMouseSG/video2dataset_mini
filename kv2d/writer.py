@@ -104,44 +104,6 @@ class CachedTarWriter(FileWriter):
         super().__init__(cache_dir=cache_dir, media=media, process_args=process_args, upload_args=upload_args)
         self.tar_file = tar_file
 
-    def upload(self):
-        try:
-            if self.upload_args.upload_hf:
-                # while osp.exists(f"~repo"):
-                #     time.sleep(1)
-
-                # run_cmd(f"GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/datasets/{self.upload_args.repo_id} ~repo", async_cmd=False)
-                # run_cmd(f"cp {self.tar_file} ~repo", async_cmd=False)
-                # run_cmd(
-                #     f"cd ~repo && git lfs track {tar_filename} && git add {tar_filename} && git commit --amend -m 'add files' && git push -f",
-                #     async_cmd=False,
-                # )
-                # run_cmd(f"rm -rf ~repo", async_cmd=False)
-                # from huggingface_hub.hf_api import HfApi
-                # hf = HfApi()
-                # hf.upload_file(path_in_repo=tar_filename, path_or_fileobj=self.tar_file, repo_id=self.upload_args.repo_id, repo_type="dataset")
-                tar_filename = osp.basename(self.tar_file)
-                cmd = f"HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli upload --repo-type dataset {self.upload_args.repo_id} {self.tar_file}"
-                logger.info(cmd)
-                ret = run_cmd(cmd, async_cmd=False).ret
-                returncode = ret.returncode
-                assert returncode == 0, f"Failed to upload {self.tar_file}, error code: {ret.stderr}"
-                logger.info(f"{self.tar_file} uploaded to {self.upload_args.repo_id}")
-
-            if self.upload_args.upload_s3:
-                run_cmd(
-                    f"aws s3 cp {self.tar_file} s3://sg-sail-home-wangjing/home/{self.upload_args.bucket} --endpoint-url {self.upload_args.endpoint_url}",
-                    async_cmd=False,
-                )
-                assert returncode == 0, f"Failed to upload {self.tar_file}, error code: {ret.stderr}"
-                logger.info(f"{self.tar_file} uploaded to {self.upload_args.bucket} via S3")
-
-            if self.upload_args.delete_local:
-                run_cmd(f"rm -rf {self.tar_file}", async_cmd=False)
-                logger.info(f"{self.tar_file} deleted")
-        except:
-            logger.error(f"Failed to upload {self.tar_file}")
-
     def close(self):
         cur_dir = osp.dirname(self.tar_file)
         key_file = osp.join(cur_dir, "keys.jsonl")
@@ -158,7 +120,6 @@ class CachedTarWriter(FileWriter):
                 writer.write({"__key__": key, fmt: video_bytes})
                 keys.append(key)
 
-        self.upload()
         run_cmd(f"rm -rf {self.cache_dir}", async_cmd=False)
 
         with safe_open(key_file, "a") as f:
