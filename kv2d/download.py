@@ -26,6 +26,7 @@ import yt_dlp
 from ffmpy import FFmpeg, FFprobe
 from tqdm import tqdm
 from queue import Queue
+from glob import glob
 
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
@@ -417,29 +418,43 @@ def process_message_queue(message_queue, progress, mapping):
     progress.refresh()
 
 
-def maybe_upload(writer, upload_args, upload_queue, upload_interval=10):
-    if upload_queue.qsize() < upload_interval or writer != "tar":
-        return
+def maybe_upload(output_dir, tar_filenames, upload_args):
+    tar_paths = [osp.join(output_dir, _) for _ in tar_filenames]
+    for tar_path in tar_paths:
+        assert osp.exists(tar_path), f"{tar_path} not found"
 
-    tar_files = []
-    while upload_queue.qsize() > 0:
-        tar_files.append(upload_queue.get())
+    import ipdb
+
+    ipdb.set_trace()
 
     if upload_args.upload_hf:
-        while not osp.exists("~repo"):
-            pass
-        run_cmd("GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/datasets/{upload_args.repo_id} ~repo", async_cmd=False)
-        run_cmd(f"cp -r {' '.join(tar_files)} ~repo", async_cmd=False)
-        _cwd = os.getcwd()
-        os.chdir("~repo")
-        upload_files(tar_files, batch_size=len(tar_files))
-        os.chdir(_cwd)
-        run_cmd("rm -rf ~repo", async_cmd=False)
-        logger.info(f"Uploaded to {upload_args.repo_id}")
+        # with tempfile.TemporaryDirectory(dir=".") as tmpdir:
+        #     run_cmd(f"GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/datasets/{upload_args.repo_id} {tmpdir}", verbose=True)
+        #     run_cmd(f"cp -r {' '.join(tar_files)} {tmpdir}")
+        #     import ipdb
+
+        #     ipdb.set_trace()
+        #     _cwd = os.getcwd()
+        #     os.chdir(tmpdir)
+        #     upload_files(tar_files, batch_size=10)
+        #     os.chdir(_cwd)
+        #     logger.info(f"Uploaded to {upload_args.repo_id}")
+        # hf_api = HfApi()
+        # hf_api.upload_folder(
+        #     repo_id=upload_args.repo_id,
+        #     folder_path=".",
+        #     allow_patterns=tar_files,
+        #     revision="main",
+        # )
+        cmd = (
+            f"HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli upload --repo-type dataset --private "
+            f"{upload_args.repo_id} {output_dir} --include {' '.join(tar_filenames)}"
+        )
+        run_cmd(cmd=cmd, verbose=True)
 
     if upload_args.upload_s3:
         ret = run_cmd(
-            f"aws s3 cp {' '.join(tar_files)} s3://sg-sail-home-wangjing/home/{upload_args.bucket} --endpoint-url {upload_args.endpoint_url}",
+            f"aws s3 cp {' '.join(tar_paths)} s3://sg-sail-home-wangjing/home/{upload_args.bucket} --endpoint-url {upload_args.endpoint_url}",
             async_cmd=False,
         )
         returncode = ret.returncode
@@ -447,7 +462,7 @@ def maybe_upload(writer, upload_args, upload_queue, upload_interval=10):
         logger.info(f"Uploaded to {upload_args.bucket} via S3")
 
     if upload_args.delete_local:
-        run_cmd(f"rm -rf {' '.join(tar_files)}", async_cmd=False)
+        run_cmd(f"rm -rf {' '.join(tar_paths)}", async_cmd=False)
         logger.info(f"Deleted local files")
 
 
@@ -528,8 +543,6 @@ def download(
     progress.start()
     task_mapping = {}
 
-    upload_queue = Queue()
-
     while len(not_done) > 0:
         done, not_done = apipe_wait(not_done, interval=3.0)
 
@@ -543,9 +556,12 @@ def download(
             global_shard_id, success, total = future.get()
             with safe_open(downloaded_shard_meta, "a") as f:
                 f.write("\t".join([str(global_shard_id), str(success), str(total)]) + "\n")
-                upload_queue.put(global_shard_id)
 
     progress.stop()
+
+    # ======================== Upload ========================
+    tar_filenames = [shardid2name(_) + ".tar" for _ in global_shard_ids]
+    maybe_upload(output_dir, tar_filenames, upload_args)
 
     df = pd.read_csv(downloaded_shard_meta, names=["shard_id", "success", "total"], delimiter="\t")
     total_downloaded = df["total"].sum()

@@ -88,7 +88,7 @@ class Sharder:
         num_shards = (num_samples + shard_size - 1) // shard_size
         num_logits = len(str(num_shards))
 
-        def write_shard(df_shard, shard_id, shard_dir):
+        def _write_shard(df_shard, shard_id, shard_dir):
             shard_file = f"{shard_dir}/shard_{shard_id:0{num_logits}d}.parquet"
             # original code use pa.ipc.new_file here, not sure if it's a bug or not
             pa_feather.write_feather(df_shard, shard_file)
@@ -112,7 +112,7 @@ class Sharder:
         # prevent slice df in multiple threads, not safe
         shard_files = map_async_with_thread(
             iterable=list(zip(local_shard_ids, local_df_shards)),
-            func=lambda x: write_shard(
+            func=lambda x: _write_shard(
                 df_shard=x[1],
                 shard_id=x[0],
                 shard_dir=shard_dir,
@@ -134,6 +134,9 @@ class Sharder:
             self._row_count += cur_row_count
             shard_idx_offset += cur_num_shards
             shard_files += cur_shard_files
+
+        self.num_shard = shard_idx_offset
+        assert self.num_shard >= self.world_size, "Number of shards should be larger or equal to world_size"
 
         return shard_files
 
@@ -191,4 +194,4 @@ class Sharder:
         return self.fetch_shard(shard_id)
 
     def __len__(self):
-        return len(self.shard_files)
+        return self.num_shard

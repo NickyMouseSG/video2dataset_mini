@@ -9,6 +9,8 @@ from .sharder import Sharder, ReadArguments
 from .process import VideoProcessArgs, ImageProcessArgs
 from .writer import UploadArgs
 
+from kn_util.utils.system import run_cmd
+
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -39,7 +41,7 @@ def get_args():
         default=16,
         help="Maximum number of downloads accumulating in thread",
     )
-    parser.add_argument("--log_file", type=str, default="downloader.log", help="Log file")
+    parser.add_argument("--log_file", type=str, default="downloader.r{rank}.log", help="Log file")
 
     # Media Arguments
     parser.add_argument("--media", type=str, default="video", help="Media type to download")
@@ -62,7 +64,8 @@ def get_args():
     parser.add_argument("--writer", type=str, default="file", help="Writer to use for saving videos")
 
     # Multi-Node Arguments
-    parser.add_argument("--rank", type=int, default=0, help="Rank of the current node")
+    parser.add_argument("--rank_split", type=int, default=1, help="Number of ranks to split the input file into")
+    parser.add_argument("--rank", type=int, default=0, help="Rank ID for the current node")
     parser.add_argument("--world_size", type=int, default=1, help="Total number of nodes")
 
     # Upload Arguments
@@ -120,10 +123,8 @@ def get_upload_args(args):
     )
 
 
-def main():
+def main_per_rank(args):
     from kn_util.utils.logger import setup_logger_loguru
-
-    args = get_args()
 
     setup_logger_loguru(filename=args.log_file, logger=logger)
 
@@ -164,6 +165,37 @@ def main():
         profile=args.profile,
         debug=args.debug,
     )
+
+
+def main():
+    args = get_args()
+
+    if args.rank_split > 1:
+        # this means even single rank of data is too large for storage
+        # normally this should be used together with --delete_local
+        assert args.delete_local, "rank_split should be used together with --delete_local"
+
+        args.world_size = args.rank_split * args.world_size
+        ranks = range(args.rank * args.rank_split, (args.rank + 1) * args.rank_split)
+
+        for rank in ranks:
+            # check finish flag
+            _finish_flag = osp.join(args.output_dir, ".meta", f".rank{rank}_ws{args.world_size}.meta")
+            if osp.exists(_finish_flag):
+                logger.info(f"Rank {rank} already finished, skip")
+
+            # run on each rank
+            args.rank = rank
+            args.log_file = args.log_file.format(rank=rank)
+            main_per_rank(args)
+
+            # create finish flag
+            with open(_finish_flag, "w") as f:
+                pass
+    else:
+        args.rank = int(args.rank)
+        args.log_file = args.log_file.format(rank=args.rank)
+        main_per_rank(args)
 
 
 if __name__ == "__main__":

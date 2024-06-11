@@ -47,42 +47,43 @@ class VideoProcessArgs(ImageProcessArgs):
     crf: int = 23
 
 
-class DecordProcessor:
-    def __init__(self, process_args: VideoProcessArgs):
-        self.args = process_args
+# class DecordProcessor:
+#     def __init__(self, process_args: VideoProcessArgs):
+#         self.args = process_args
 
-    def get_video_meta(self, byte_stream):
-        byte_io = io.BytesIO(byte_stream)
-        reader = VideoReader(byte_io, num_threads=4)
-        shape = reader[0].shape
-        shape = (shape[1], shape[0])
-        fps = reader.get_avg_fps()
-        frame_count = len(reader)
+#     def get_video_meta(self, byte_stream):
+#         byte_io = io.BytesIO(byte_stream)
+#         reader = VideoReader(byte_io, num_threads=4)
+#         shape = reader[0].shape
+#         shape = (shape[1], shape[0])
+#         fps = reader.get_avg_fps()
+#         frame_count = len(reader)
 
-        return {
-            "shape": shape,
-            "fps": fps,
-            "frame_count": frame_count,
-            "duration": frame_count / fps,
-        }
+#         return {
+#             "shape": shape,
+#             "fps": fps,
+#             "frame_count": frame_count,
+#             "duration": frame_count / fps,
+#         }
 
-    def __call__(self, byte_stream, timestamps):
-        # 1. prepare the video reader
-        byte_io = io.BytesIO(byte_stream)
-        video_meta = self.get_video_meta(byte_stream)
-        orig_shape = video_meta["shape"]
-        fps = video_meta["fps"]
+#     def __call__(self, byte_stream, timestamps):
+#         # 1. prepare the video reader
+#         byte_io = io.BytesIO(byte_stream)
+#         video_meta = self.get_video_meta(byte_stream)
+#         orig_shape = video_meta["shape"]
+#         fps = video_meta["fps"]
 
-        target_size = _get_target_size(byte_io, orig_shape=orig_shape, resize_mode=self.args.resize_mode)
-        vr = VideoReader(byte_stream, height=target_size[0], width=target_size[1], num_threads=4)
+#         target_size = _get_target_size(byte_io, orig_shape=orig_shape, resize_mode=self.args.resize_mode)
+#         vr = VideoReader(byte_stream, height=target_size[0], width=target_size[1], num_threads=4)
 
-        # 2. calculate frame indices
-        for st, ed in timestamps:
-            clip_duration = ed - st
+#         # 2. calculate frame indices
+#         for st, ed in timestamps:
+#             clip_duration = ed - st
 
-            duration_tgt, num_frames_tgt, fps_tgt = fill_temporal_param(duration=duration, fps=self.args.fps)
+#             duration_tgt, num_frames_tgt, fps_tgt = fill_temporal_param(duration=duration, fps=self.args.fps)
 
-        # TODO - implement the rest of the function
+
+#         # TODO - implement the rest of the function
 
 
 class FFmpegProcessor:
