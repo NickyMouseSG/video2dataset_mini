@@ -16,6 +16,26 @@ from kn_util.data.video import read_frames_decord
 from kn_util.utils.download import MultiThreadDownloader, get_hf_headers
 
 
+class WDSShardIterableDataset(IterableDataset):
+    def __init__(self, urls, num_threads=16, shard_cache_size=4):
+        self.urls = urls
+        self.downloader = MultiThreadDownloader(
+            num_threads=num_threads,
+            headers=get_hf_headers(),
+            verbose=0,
+        )
+        self.shard_cache_size = shard_cache_size
+        self.shard_cache = Queue()
+
+    def __iter__(self):
+        for url in self.urls:
+            _last_tempfile = None
+            with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as f:
+                self.downloader.download(url, f.name)
+                print(f"Downloaded {url} to {f.name}")
+                yield url, wds.WebDataset(f.name)
+
+
 class VideoShardIterableDataset(IterableDataset):
     """IterableDataset for reading videos from online shards
     Use DataLoader to prefetch shards online
@@ -26,38 +46,23 @@ class VideoShardIterableDataset(IterableDataset):
         prefetch_factor (int): prefetch factor for DataLoader
     """
 
-    class _ShardIterableDataset(IterableDataset):
-        def __init__(self, urls, num_threads=16, shard_cache_size=4):
-            self.urls = urls
-            self.downloader = MultiThreadDownloader(
-                num_threads=num_threads,
-                headers=get_hf_headers(),
-                verbose=0,
-            )
-            self.shard_cache_size = shard_cache_size
-            self.shard_cache = Queue()
-
-        def __iter__(self):
-            for url in self.urls:
-                _last_tempfile = None
-                with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as f:
-                    self.downloader.download(url, f.name)
-                    print(f"Downloaded {url} to {f.name}")
-                    yield url, wds.WebDataset(f.name)
-
-    def __init__(self, urls, num_threads=16, num_workers=4, prefetch_factor=2):
+    def __init__(self, urls, num_threads=16, num_workers=4, prefetch_factor=2, return_meta=False):
         self.urls = urls
         self.shard_gen = DataLoader(
-            self._ShardIterableDataset(urls, num_threads=num_threads),
+            WDSShardIterableDataset(urls, num_threads=num_threads),
             num_workers=num_workers,
             prefetch_factor=prefetch_factor,
             collate_fn=lambda x: x[0],
         )
+        self.return_meta = return_meta
 
     def __iter__(self):
         for url, shard in self.shard_gen:
             for idx, sample in enumerate(shard):
-                yield url, idx, sample
+                if self.return_meta:
+                    yield url, idx, sample
+                else:
+                    yield sample
 
 
 class VideoIterableDataset(IterableDataset):
