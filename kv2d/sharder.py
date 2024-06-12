@@ -194,4 +194,4 @@ class Sharder:
         return self.fetch_shard(shard_id)
 
     def __len__(self):
-        return self.num_shard
+        return len(self.shard_files)

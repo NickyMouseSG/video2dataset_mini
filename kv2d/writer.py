@@ -55,12 +55,11 @@ class TarWriter:
 
 
 class FileWriter:
-    def __init__(self, cache_dir, process_args, upload_args, media="video"):
+    def __init__(self, cache_dir, process_args, media="video"):
         self.cache_dir = cache_dir
         self.media = media
         os.makedirs(self.cache_dir, exist_ok=True)
         self.process_args = process_args
-        self.upload_args = upload_args
 
     def upload(self):
         raise NotImplementedError
@@ -96,17 +95,21 @@ class FileWriter:
         return downloaded_ids
 
     def close(self):
-        pass
+        run_cmd(f"touch {self.cache_dir}/.finish")
+
+    @property
+    def finish(self):
+        return osp.exists(osp.join(self.cache_dir, ".finish"))
 
 
 class CachedTarWriter(FileWriter):
-    def __init__(self, tar_file, cache_dir, process_args, upload_args, media="video"):
-        super().__init__(cache_dir=cache_dir, media=media, process_args=process_args, upload_args=upload_args)
+    def __init__(self, tar_file, cache_dir, process_args, media="video"):
+        super().__init__(cache_dir=cache_dir, media=media, process_args=process_args)
         self.tar_file = tar_file
 
     def close(self):
         cur_dir = osp.dirname(self.tar_file)
-        key_file = osp.join(cur_dir, "keys.jsonl")
+        key_file = osp.join(cur_dir, "keys.json")
         tar_filename = osp.basename(self.tar_file)
 
         writer = wds.TarWriter(open(self.tar_file, "wb"))
@@ -122,22 +125,36 @@ class CachedTarWriter(FileWriter):
 
         run_cmd(f"rm -rf {self.cache_dir}", async_cmd=False)
 
-        with safe_open(key_file, "a") as f:
-            item = {"tar": tar_filename, "keys": keys}
-            json_str = json.dumps(item)
-            f.write(json_str + "\n")
+        if not osp.exists(key_file):
+            with safe_open(key_file, "w") as f:
+                json.dump({tar_filename: keys}, f, indent=4)
+        else:
+            with safe_open(key_file, "r+") as f:
+                try:
+                    json_dict = json.load(f)
+                except json.JSONDecodeError:
+                    json_dict = {}
+
+                json_dict[tar_filename] = keys
+
+                f.seek(0)
+                f.truncate()
+                json.dump(json_dict, f, indent=4)
+
+    def finish(self):
+        return osp.exists(self.tar_file) and not osp.exists(self.cache_dir)
 
 
-def get_writer(writer, output_dir, shard_id, process_args, upload_args, media="video"):
+def get_writer(writer, output_dir, shard_id, process_args, media="video"):
     from .utils import logits
 
     cache_dir = osp.join(output_dir, f"cache.{shard_id:0{logits}d}")
     tar_file = osp.join(output_dir, f"{shard_id:0{logits}d}.tar")
     if writer == "file":
         logger.warning("Using file writer, upload_args will be ignored")
-        return FileWriter(cache_dir=cache_dir, process_args=process_args, upload_args=upload_args, media=media)
+        return FileWriter(cache_dir=cache_dir, process_args=process_args, media=media)
     elif writer == "tar":
-        return CachedTarWriter(tar_file, cache_dir=cache_dir, media=media, process_args=process_args, upload_args=upload_args)
+        return CachedTarWriter(tar_file, cache_dir=cache_dir, media=media, process_args=process_args)
     else:
         raise ValueError(f"Invalid writer: {writer}")
 

@@ -17,6 +17,14 @@ import numpy as np
 from kn_util.data.video import get_frame_indices, fill_temporal_param
 from kn_util.utils.system import run_cmd
 
+def get_processor(process_args, media="video"):
+    if media == "video":
+        processor = FFmpegProcessor(process_args=process_args)
+    elif media == "image":
+        processor = CV2Processor(process_args=process_args)
+    else:
+        raise ValueError(f"Invalid media type: {media}")
+    return processor
 
 def _get_target_size(size, orig_shape, resize_mode="shortest", divided_by=1):
     cmp = lambda x, y: x < y if resize_mode == "shortest" else x > y

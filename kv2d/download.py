@@ -33,7 +33,7 @@ os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 from .writer import BufferedTextWriter, get_writer, UploadArgs
 from .sharder import Sharder
 from .utils import shardid2name, safe_open
-from .process import ImageProcessArgs, VideoProcessArgs, FFmpegProcessor, CV2Processor
+from .process import ImageProcessArgs, get_processor
 
 from kn_util.data.video import download_youtube_as_bytes, read_frames_decord
 from kn_util.data.video.download import StorageLogger
@@ -290,8 +290,9 @@ def download_shard(
         shard_id=shard_id,
         media=media,
         process_args=process_args,
-        upload_args=upload_args,
     )
+
+    processor = get_processor(process_args, media=media)
 
     id_shard, url_shard, timestamp_shard, meta_shard = filter_shard(
         id_shard, url_shard, timestamp_shard, meta_shard, byte_writer.downloaded_ids
@@ -309,13 +310,6 @@ def download_shard(
         semaphore_limit=semaphore_limit,
         max_retries=max_retries,
     )
-
-    if media == "video":
-        processor = FFmpegProcessor(process_args=process_args)
-    elif media == "image":
-        processor = CV2Processor(process_args=process_args)
-    else:
-        raise ValueError(f"Invalid media type: {media}")
 
     def process(_id, byte_stream, errorcode):
         # or message_queue won't work
@@ -422,35 +416,31 @@ def maybe_upload(output_dir, tar_filenames, upload_args):
     tar_paths = [osp.join(output_dir, _) for _ in tar_filenames]
     for tar_path in tar_paths:
         assert osp.exists(tar_path), f"{tar_path} not found"
-
-    import ipdb
-
-    ipdb.set_trace()
+    
+    logger.info(f"Found {len(tar_paths)} files to upload")
 
     if upload_args.upload_hf:
-        # with tempfile.TemporaryDirectory(dir=".") as tmpdir:
-        #     run_cmd(f"GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/datasets/{upload_args.repo_id} {tmpdir}", verbose=True)
-        #     run_cmd(f"cp -r {' '.join(tar_files)} {tmpdir}")
-        #     import ipdb
+        while True:
+            # failproof to multiple uploads
+            try:
+                hf_api = HfApi()
+                hf_api.upload_folder(
+                    repo_id=upload_args.repo_id,
+                    folder_path=output_dir,
+                    allow_patterns=tar_filenames,
+                    revision="main",
+                    repo_type="dataset",
+                )
+                break
+            except Exception as e:
+                logger.error(e)
+                time.sleep(10)
 
-        #     ipdb.set_trace()
-        #     _cwd = os.getcwd()
-        #     os.chdir(tmpdir)
-        #     upload_files(tar_files, batch_size=10)
-        #     os.chdir(_cwd)
-        #     logger.info(f"Uploaded to {upload_args.repo_id}")
-        # hf_api = HfApi()
-        # hf_api.upload_folder(
-        #     repo_id=upload_args.repo_id,
-        #     folder_path=".",
-        #     allow_patterns=tar_files,
-        #     revision="main",
+        # cmd = (
+        #     f"HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli upload --repo-type dataset --private "
+        #     f"{upload_args.repo_id} {output_dir} --include {' '.join(tar_filenames)}"
         # )
-        cmd = (
-            f"HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli upload --repo-type dataset --private "
-            f"{upload_args.repo_id} {output_dir} --include {' '.join(tar_filenames)}"
-        )
-        run_cmd(cmd=cmd, verbose=True)
+        # run_cmd(cmd=cmd, verbose=True)
 
     if upload_args.upload_s3:
         ret = run_cmd(
@@ -512,21 +502,26 @@ def download(
         return global_shard_id, success, total
 
     num_shards = len(sharder)
-    downloaded_shard_meta = osp.join(output_dir, ".meta", "downloaded_shards.txt")
+    finished_shard_meta = osp.join(output_dir, ".meta", "finished_shards.txt")
     global_shard_ids = [sharder.get_global_id(i) for i in range(0, num_shards)]  # global shard ids processed in current rank
 
-    if not osp.exists(downloaded_shard_meta):
-        with open(downloaded_shard_meta, "w") as f:
+    if not osp.exists(finished_shard_meta):
+        with open(finished_shard_meta, "w") as f:
             pass
 
-    with open(downloaded_shard_meta, "r") as f:
+    with open(finished_shard_meta, "r") as f:
         lines = [_.strip() for _ in f.readlines() if len(_.strip()) > 0]
-        downloaded_shard_ids = [int(_.split("\t")[0]) for _ in lines]
-        downloaded_shard_ids = [_ for _ in downloaded_shard_ids if _ in global_shard_ids]
+        finished_shard_ids = [int(_.split("\t")[0]) for _ in lines]
+        finished_shard_ids = [_ for _ in finished_shard_ids if _ in global_shard_ids]
 
     executor = mp.ProcessPool(num_processes)
 
-    local_shard_ids = [sharder.get_local_id(i) for i in global_shard_ids if i not in downloaded_shard_ids]
+    global_shard_ids = [i for i in global_shard_ids if i not in finished_shard_ids]
+    local_shard_ids = [sharder.get_local_id(i) for i in global_shard_ids]
+    
+    if len(global_shard_ids) == 0:
+        logger.info(f"All shards have been downloaded in rank {rank}")
+        return
 
     # ======================== DEBUG ========================
     if debug:
@@ -536,12 +531,21 @@ def download(
 
     not_done = set()
     for shard_id in local_shard_ids:
+        tar_path = osp.join(output_dir, shardid2name(shard_id) + ".tar")
+        cache_dir = osp.join(output_dir, "cache."+shardid2name(shard_id))
+        downloaded_but_not_uploaded = osp.exists(tar_path) and not osp.exists(cache_dir)
+        if downloaded_but_not_uploaded:
+            logger.info(f"Shard {shard_id} already downloaded but not uploaded")
+            continue
+
         future = executor.apipe(launch_job, local_shard_id=shard_id)
         not_done.add(future)
 
     progress = get_rich_progress_mofn()
     progress.start()
     task_mapping = {}
+
+    finished_rows = []
 
     while len(not_done) > 0:
         done, not_done = apipe_wait(not_done, interval=3.0)
@@ -554,8 +558,7 @@ def download(
 
         for future in done:
             global_shard_id, success, total = future.get()
-            with safe_open(downloaded_shard_meta, "a") as f:
-                f.write("\t".join([str(global_shard_id), str(success), str(total)]) + "\n")
+            finished_rows += ["\t".join([str(global_shard_id), str(success), str(total)])]
 
     progress.stop()
 
@@ -563,7 +566,12 @@ def download(
     tar_filenames = [shardid2name(_) + ".tar" for _ in global_shard_ids]
     maybe_upload(output_dir, tar_filenames, upload_args)
 
-    df = pd.read_csv(downloaded_shard_meta, names=["shard_id", "success", "total"], delimiter="\t")
+    # ======================== Success ========================
+    # Here finished means downloaded, processed and (maybe) uploaded
+    with safe_open(finished_shard_meta, "a") as f:
+        f.write("\n".join(finished_rows) + "\n")
+
+    df = pd.read_csv(finished_shard_meta, names=["shard_id", "success", "total"], delimiter="\t")
     total_downloaded = df["total"].sum()
     total_finished = df["success"].sum()
 

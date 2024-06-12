@@ -41,7 +41,7 @@ def get_args():
         default=16,
         help="Maximum number of downloads accumulating in thread",
     )
-    parser.add_argument("--log_file", type=str, default="downloader.r{rank}.log", help="Log file")
+    parser.add_argument("--log_file", type=str, default="downloader.log", help="Log file")
 
     # Media Arguments
     parser.add_argument("--media", type=str, default="video", help="Media type to download")
@@ -124,9 +124,6 @@ def get_upload_args(args):
 
 
 def main_per_rank(args):
-    from kn_util.utils.logger import setup_logger_loguru
-
-    setup_logger_loguru(filename=args.log_file, logger=logger)
 
     # if args.timestamp_col is not None:
     #     logger.info("Forced to set args.download_only and args.process_download to True when using timestamp_col")
@@ -168,7 +165,10 @@ def main_per_rank(args):
 
 
 def main():
+    from kn_util.utils.logger import setup_logger_loguru
+
     args = get_args()
+    setup_logger_loguru(filename=args.log_file, logger=logger)
 
     if args.rank_split > 1:
         # this means even single rank of data is too large for storage
@@ -179,19 +179,9 @@ def main():
         ranks = range(args.rank * args.rank_split, (args.rank + 1) * args.rank_split)
 
         for rank in ranks:
-            # check finish flag
-            _finish_flag = osp.join(args.output_dir, ".meta", f".rank{rank}_ws{args.world_size}.meta")
-            if osp.exists(_finish_flag):
-                logger.info(f"Rank {rank} already finished, skip")
-
-            # run on each rank
             args.rank = rank
             args.log_file = args.log_file.format(rank=rank)
             main_per_rank(args)
-
-            # create finish flag
-            with open(_finish_flag, "w") as f:
-                pass
     else:
         args.rank = int(args.rank)
         args.log_file = args.log_file.format(rank=args.rank)
