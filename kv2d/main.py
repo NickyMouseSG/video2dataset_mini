@@ -50,6 +50,7 @@ def get_args():
     parser.add_argument("--url_col", type=str, default="url", help="Column name for video URLs")
     parser.add_argument("--id_col", type=str, default="id", help="Column name for video IDs")
     parser.add_argument("--timestamp_col", type=str, default=None, help="Column name for timestamps")
+    parser.add_argument("--include_shard_ids", nargs="+", default=None, help="Shard IDs to include")
 
     # Process Arguments
     parser.add_argument("--skip_process", action="store_true", help="All processing arguments will be ignored")
@@ -133,7 +134,13 @@ def main_per_rank(args):
     os.makedirs(osp.join(args.output_dir, ".meta"), exist_ok=True)
     os.makedirs(osp.dirname(osp.abspath(args.log_file)), exist_ok=True)
 
-    read_args = ReadArguments(headers=True, url_col=args.url_col, id_col=args.id_col, timestamp_col=args.timestamp_col)
+    read_args = ReadArguments(
+        headers=True,
+        url_col=args.url_col,
+        id_col=args.id_col,
+        timestamp_col=args.timestamp_col,
+        include_shard_ids=args.include_shard_ids,
+    )
     sharder = Sharder(
         input_file=args.input_file,
         read_args=read_args,

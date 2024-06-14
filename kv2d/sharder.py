@@ -14,6 +14,7 @@ class ReadArguments:
     url_col: str = "url"
     id_col: str = "id"
     timestamp_col: str = None
+    include_shard_ids: list = None
 
 
 class Sharder:
@@ -104,6 +105,9 @@ class Sharder:
             for i in range(self.rank_id * num_shard_per_rank, (self.rank_id + 1) * num_shard_per_rank)
             if i < num_shards
         ]
+        if self.read_args.include_shard_ids:
+            local_shard_ids = [i for i in local_shard_ids if i in self.read_args.include_shard_ids]
+            logger.info(f"Applying Shard IDs Filter, got {len(local_shard_ids)} shards in rank {self.rank_id}.")
         self.local_shard_ids = local_shard_ids
         shard_spans = [(1 + i * shard_size, min(1 + (i + 1) * shard_size, len(df))) for i in local_shard_ids]
         # here 1+ is used to skip the header
