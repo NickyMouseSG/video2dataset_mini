@@ -7,6 +7,13 @@ import tempfile
 import webdataset as wds
 from queue import Queue
 import os, os.path as osp
+from functools import partial
+from pathos.multiprocessing import ProcessPool
+from time import time
+from huggingface_hub import HfApi
+import re
+from multiprocessing import Semaphore
+
 
 from tqdm import tqdm
 
@@ -17,21 +24,83 @@ from kn_util.utils.download import MultiThreadDownloader, get_hf_headers
 
 
 class WDSShardIterDataset(IterableDataset):
-    def __init__(self, urls, num_threads=16, shard_cache_size=4):
+    def __init__(self, urls, num_threads=16):
         self.urls = urls
         self.downloader = MultiThreadDownloader(
             num_threads=num_threads,
             headers=get_hf_headers(),
             verbose=0,
         )
-        self.shard_cache_size = shard_cache_size
-        self.shard_cache = Queue()
 
     def __iter__(self):
         for url in self.urls:
             with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as f:
                 self.downloader.download(url, f.name)
                 yield url, wds.WebDataset(f.name)
+
+
+class WDSShardIterDataset_HFDL(IterableDataset):
+    def __init__(self, urls, num_threads=16):
+        self.urls = urls
+        self.hf_api = HfApi()
+
+    def _parse_url(self, url):
+        # url example "https://huggingface.co/sailvideo/webvid10m/resolve/main/00000.tar"
+        # return "sailvideo/webvid10m", "00000.tar"
+        re_match = re.search(r"https://huggingface.co/datasets/(.*?)/resolve/main/(.*)", url)
+        url = re_match.group(1)
+        filename = re_match.group(2)
+        return url, filename
+
+    def __iter__(self):
+        for url in self.urls:
+            repo_id, filename = self._parse_url(url)
+            print(repo_id, filename)
+            path = self.hf_api.hf_hub_download(repo_id=repo_id, filename=filename, repo_type="dataset")
+
+            yield url, wds.WebDataset(path)
+
+
+def _download(url, downloader):
+    print(f"Start downloading {url}")
+
+    st = time()
+    with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as f:
+        downloader.download(url, f.name)
+
+        print(f"Downloaded {url} in {time() - st:.2f}s")
+        return url, wds.WebDataset(f.name)
+
+
+class ShardIterDataset_MP(IterableDataset):
+    """IterableDataset for reading shards from LFS repo
+    Use DataLoader to prefetch shards online
+    Args:
+        urls (List[str]): list of urls to download
+        num_threads (int): number of threads for downloading
+        num_workers (int): number of workers for DataLoader for fetching `shard`
+        prefetch_factor (int): prefetch factor for DataLoader
+    Returns:
+        url, idx, sample if return_meta is True
+        sample if return_meta is False
+    """
+
+    def __init__(self, urls, num_threads=16, prefetch_factor=2, ordered=True, return_meta=False):
+        self.urls = urls
+        self.downloader = MultiThreadDownloader(num_threads=num_threads, headers=get_hf_headers(), verbose=0)
+        self.num_workers = 1
+        self.return_meta = return_meta
+        self.ordered = ordered
+
+    def __iter__(self):
+        with ProcessPool(self.num_workers) as p:
+            map_func = p.imap if self.ordered else p.uimap
+            for url, shard in map_func(partial(_download, downloader=self.downloader), self.urls):
+                for idx, sample in enumerate(shard):
+                    if self.return_meta:
+                        yield url, idx, sample
+                    else:
+                        yield sample
 
 
 class ShardIterDataset(IterableDataset):

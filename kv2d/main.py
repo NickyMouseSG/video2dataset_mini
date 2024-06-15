@@ -55,10 +55,10 @@ def get_args():
     # Process Arguments
     parser.add_argument("--skip_process", action="store_true", help="All processing arguments will be ignored")
     parser.add_argument("--process_download", action="store_true", help="Process videos while downloading")
-    parser.add_argument("--size", type=int, default=512, help="Size of the smaller dimension of the output video")
+    parser.add_argument("--size", type=int, default=None, help="Size of the smaller dimension of the output video")
     parser.add_argument("--max_size", type=int, default=None, help="Maximum size of the smaller dimension of the output video")
     parser.add_argument("--resize_mode", type=str, default="shortest", help="Mode for resizing the video")
-    parser.add_argument("--crf", type=int, default=23, help="CRF value for the output video")
+    parser.add_argument("--crf", type=int, default=None, help="CRF value for the output video")
     parser.add_argument("--fps", type=int, default=24, help="Frames per second for the output video")
 
     # Writer Arguments

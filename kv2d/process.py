@@ -14,8 +14,9 @@ import copy
 import cv2
 import numpy as np
 
-from kn_util.data.video import get_frame_indices, fill_temporal_param
+from kn_util.data.video import get_frame_indices, fill_temporal_param, probe_meta_decord, probe_meta_ffprobe
 from kn_util.utils.system import run_cmd
+
 
 def get_processor(process_args, media="video"):
     if media == "video":
@@ -25,6 +26,7 @@ def get_processor(process_args, media="video"):
     else:
         raise ValueError(f"Invalid media type: {media}")
     return processor
+
 
 def _get_target_size(size, orig_shape, resize_mode="shortest", divided_by=1):
     cmp = lambda x, y: x < y if resize_mode == "shortest" else x > y
@@ -42,7 +44,7 @@ def _get_target_size(size, orig_shape, resize_mode="shortest", divided_by=1):
 @dataclass
 class ImageProcessArgs:
     skip_process: bool = False
-    size: int = 512
+    size: int = None
     max_size: int = None
     center_crop: bool = False
     resize_mode: str = "shortest"
@@ -51,8 +53,8 @@ class ImageProcessArgs:
 
 @dataclass
 class VideoProcessArgs(ImageProcessArgs):
-    fps: int = 24
-    crf: int = 23
+    fps: int = None
+    crf: int = None
 
 
 # class DecordProcessor:
@@ -95,57 +97,49 @@ class VideoProcessArgs(ImageProcessArgs):
 
 
 class FFmpegProcessor:
-    def __init__(self, process_args: VideoProcessArgs):
+    def __init__(self, process_args: VideoProcessArgs, num_threads=4):
         self.args = process_args
+        self.num_threads = num_threads
 
-    def probe_meta(self, video_path):
-        ffprobe = FFprobe(
-            inputs={video_path: None},
-            global_options=" ".join(
-                [
-                    "-v error",
-                    "-select_streams v:0",
-                    "-show_entries",
-                    "stream=r_frame_rate,width,height,nb_frames",
-                    "-of csv=p=0",
-                ]
-            ),
-        )
+    def get_size(self, path):
+        size = None
+        try:
+            video_meta = probe_meta_decord(path)
+            size = video_meta["width"], video_meta["height"]
+        except:
+            print("Failed to probe meta using decord, trying ffprobe")
+            video_meta = probe_meta_ffprobe(path)
+            size = video_meta["width"], video_meta["height"]
 
-        probe_strs = run_cmd(ffprobe.cmd).stdout.split(",")
-        meta = {
-            "fps": eval(probe_strs[2]),
-            "size": (int(probe_strs[0]), int(probe_strs[1])),
-            "num_frames": int(probe_strs[3]),
-        }
-        return meta
+        return size
 
     def __call__(self, byte_stream):
         f = tempfile.NamedTemporaryFile(suffix=".mp4")
         f.write(byte_stream)
 
-        video_meta = self.probe_meta(f.name)
-        size = video_meta["size"]
+        output_kwargs = []
 
-        target_size = _get_target_size(
-            self.args.size,
-            orig_shape=size,
-            resize_mode=self.args.resize_mode,
-            divided_by=2,
-        )
+        if self.args.size is not None:
+            size = self.get_size(f.name)
+            target_size = _get_target_size(
+                self.args.size,
+                orig_shape=size,
+                resize_mode=self.args.resize_mode,
+                divided_by=2,
+            )
+            output_kwargs.append(f"-vf scale={target_size[0]}:{target_size[1]}")
+
+        if self.args.fps is not None:
+            output_kwargs.append(f"-r {self.args.fps}")
+
+        if self.args.crf is not None:
+            output_kwargs.append(f"-crf {self.args.crf}")
+        
         output_f = tempfile.NamedTemporaryFile(suffix=".mp4")
         ff = FFmpeg(
             inputs={f.name: None},
-            outputs={
-                output_f.name: " ".join(
-                    [
-                        f"-crf {self.args.crf}",
-                        f"-vf scale={target_size[0]}:{target_size[1]}",
-                        f"-r {self.args.fps}",
-                    ]
-                )
-            },
-            global_options=" ".join(["-hide_banner", "-loglevel error", "-y", "-threads 4"]),
+            outputs={output_f.name: " ".join(output_kwargs)},
+            global_options=" ".join(["-hide_banner", "-loglevel error", "-y", f"-threads {self.num_threads}"]),
         )
         popen_output = run_cmd(ff.cmd)
         popen_output.check_returncode()

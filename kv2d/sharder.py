@@ -123,7 +123,7 @@ class Sharder:
             ),
             verbose=False,
         )
-        logger.info(f"Input data ({num_samples} rows) has been sharded into {len(local_shard_ids)} shards in rank {self.rank_id}.")
+        logger.info(f"Input data ({num_samples} rows) has been sharded into {len(local_shard_ids)} / {num_shards} shards in rank {self.rank_id}.")
 
         return shard_files, num_shards, len(df)
 
