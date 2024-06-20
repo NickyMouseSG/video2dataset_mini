@@ -38,7 +38,7 @@ from .process import ImageProcessArgs, get_processor
 from kn_util.data.video import download_youtube_as_bytes, read_frames_decord
 from kn_util.data.video.download import StorageLogger
 from kn_util.utils.rich import get_rich_progress_mofn
-from kn_util.utils.download import MultiThreadDownloaderInMem
+from kn_util.utils.download import MultiThreadDownloaderInMem, CoroutineDownloaderInMem
 from kn_util.utils.error import SuppressStdoutStderr
 from kn_util.utils.system import run_cmd, force_delete_dir, clear_process_dir
 from kn_util.tools.lfs import upload_files
@@ -63,7 +63,7 @@ def _download_single_youtube(url, size=256, timestamp=None):
 
 def _download_single_direct(url):
     try:
-        downloader = MultiThreadDownloaderInMem(verbose=False, max_retries=0, num_threads=1)
+        downloader = CoroutineDownloaderInMem(verbose=False, max_retries=0)
         video_bytes = downloader.download(url)
     except Exception as e:
         return None, 1, str(e)
@@ -141,24 +141,6 @@ def download_single(url, size, semaphore, timestamp=None, media="video"):
     try:
         if media == "video":
             if not (url.endswith(".mp4") or url.endswith(".avi") or url.endswith(".mkv")):
-                # if timestamp is not None:
-                #     # https://github.com/iejMac/video2dataset/blob/main/video2dataset/data_reader.py
-                #     video_format = f"wv*[height>={size}][ext=mp4]/" f"w[height>={size}][ext=mp4]/" "bv/b[ext=mp4]"
-                #     # https://stackoverflow.com/questions/73673489/how-to-pass-get-url-flag-to-youtube-dl-or-yt-dlp-when-embedded-in-code
-                #     options = {
-                #         "quiet": True,
-                #         "simulate": True,
-                #         "forceurl": True,
-                #         "format": video_format,
-                #     }
-                #     import ipdb; ipdb.set_trace()
-                #     with yt_dlp.YoutubeDL(options) as ydl:
-                #         info = ydl.extract_info(url, download=False)
-                #         if "entries" in info:
-                #             info = info["entries"][0]
-                #         url = info["url"]
-                #     _bytes, errorcode, error_str = _download_single_ffmpeg(url, timestamp)
-                # else:
                 _bytes, errorcode, error_str = _download_single_youtube(url, size=size, timestamp=timestamp)
             else:
                 _bytes, errorcode, error_str = _download_single_direct(url)
@@ -318,54 +300,49 @@ def download_shard(
         if errorcode != 0:
             return
 
-        if media == "video":
-            try:
-                if process_args.skip_process:
-                    byte_writer.write(key=_id, array=byte_stream, fmt="mp4")
-                else:
+        try:
+            if process_args.skip_process:
+                byte_writer.write(key=_id, array=byte_stream, fmt="mp4")
+            else:
+                try:
                     byte_stream = processor(byte_stream)
+                except Exception as e:
+                    raise ValueError(f"Error while processing {_id}: {e}")
+                try:
                     byte_writer.write(key=_id, array=byte_stream, fmt="mp4")
+                except Exception as e:
+                    raise ValueError(f"Error while writing {_id}: {e}")
 
-                success += 1
-                message_queue.put(("PROGRESS", shard_id, 1))
+            success += 1
+            message_queue.put(("PROGRESS", shard_id, 1))
 
-                # vid_writer.write(vid)
-            except Exception as e:
-                error_writer.write("\t".join([_id, str(e)]))
-                return
-
-        elif media == "image":
-            try:
-                if process_args.skip_process:
-                    byte_writer.write(key=_id, array=byte_stream, fmt="jpeg")
-                else:
-                    byte_stream = processor(byte_stream)
-                    byte_writer.write(key=_id, array=byte_stream, fmt="jpeg")
-
-                success += 1
-                message_queue.put(("PROGRESS", shard_id, 1))
-
-            except Exception as e:
-                error_writer.write("\t".join([_id, str(e)]))
-                return
+            # vid_writer.write(vid)
+        except Exception as e:
+            # TODO: something wrong here
+            # TypeError("'<' not supported between instances of 'NoneType' and 'NoneType'")
+            error_writer.write("\t".join([_id, str(e)]))
+            return
 
     # =================== DEBUG ======================
     if debug:
         print(f"shard_id: {shard_id}")
-        for i in tqdm(range(len(url_shard))):
-            video_bytes, errorcode, msg = download_single(
-                url=url_shard[i],
-                timestamp=timestamp_shard[i],
-                size=360,
-                semaphore=Semaphore(1),
-                media=media,
-            )
-            _id = id_shard[i]
-            process(_id, video_bytes, errorcode)
+        for _id, byte_stream, errorcode in tqdm(download_gen):
+            # video_bytes, errorcode, msg = download_single(
+            #     url=url_shard[i],
+            #     timestamp=timestamp_shard[i],
+            #     size=process_args.size,
+            #     semaphore=Semaphore(1),
+            #     media=media,
+            # )
+            # _id = id_shard[i]
+            process(_id, byte_stream, errorcode)
     # ================================================
 
     for _id, byte_stream, errorcode in download_gen:
-        process(_id, byte_stream, errorcode)
+        try:
+            process(_id, byte_stream, errorcode)
+        except Exception as e:
+            print(f"Error while processing {_id}: {e}")
 
     byte_writer.close()
 
@@ -416,7 +393,7 @@ def maybe_upload(output_dir, tar_filenames, upload_args):
     tar_paths = [osp.join(output_dir, _) for _ in tar_filenames]
     for tar_path in tar_paths:
         assert osp.exists(tar_path), f"{tar_path} not found"
-    
+
     logger.info(f"Found {len(tar_paths)} files to upload")
 
     if upload_args.upload_hf:
@@ -518,7 +495,7 @@ def download(
 
     global_shard_ids = [i for i in global_shard_ids if i not in finished_shard_ids]
     local_shard_ids = [sharder.get_local_id(i) for i in global_shard_ids]
-    
+
     if len(global_shard_ids) == 0:
         logger.info(f"All shards have been downloaded in rank {rank}")
         return
@@ -532,16 +509,16 @@ def download(
     not_done = set()
     for shard_id in local_shard_ids:
         tar_path = osp.join(output_dir, shardid2name(shard_id) + ".tar")
-        cache_dir = osp.join(output_dir, "cache."+shardid2name(shard_id))
+        cache_dir = osp.join(output_dir, "cache." + shardid2name(shard_id))
         downloaded_but_not_uploaded = osp.exists(tar_path) and not osp.exists(cache_dir)
         if downloaded_but_not_uploaded:
-            logger.info(f"Shard {shard_id} already downloaded but not uploaded")
+            logger.info(f"Shard {shard_id} already downloaded (maybe not uploaded)")
             continue
 
         future = executor.apipe(launch_job, local_shard_id=shard_id)
         not_done.add(future)
 
-    progress = get_rich_progress_mofn()
+    progress = get_rich_progress_mofn(disable=False)
     progress.start()
     task_mapping = {}
 

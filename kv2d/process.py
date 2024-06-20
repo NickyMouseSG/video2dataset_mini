@@ -13,8 +13,10 @@ import glob
 import copy
 import cv2
 import numpy as np
+from pprint import pprint
+from loguru import logger
 
-from kn_util.data.video import get_frame_indices, fill_temporal_param, probe_meta_decord, probe_meta_ffprobe
+from kn_util.data.video import get_frame_indices, fill_temporal_param, probe_meta
 from kn_util.utils.system import run_cmd
 
 
@@ -103,13 +105,12 @@ class FFmpegProcessor:
 
     def get_size(self, path):
         size = None
-        try:
-            video_meta = probe_meta_decord(path)
-            size = video_meta["width"], video_meta["height"]
-        except:
-            print("Failed to probe meta using decord, trying ffprobe")
-            video_meta = probe_meta_ffprobe(path)
-            size = video_meta["width"], video_meta["height"]
+        video_meta = probe_meta(path)
+
+        if video_meta is None:
+            raise ValueError(f"Failed to get video meta: {path}, seems like a corrupted video file")
+
+        size = video_meta["width"], video_meta["height"]
 
         return size
 
@@ -121,6 +122,7 @@ class FFmpegProcessor:
 
         if self.args.size is not None:
             size = self.get_size(f.name)
+
             target_size = _get_target_size(
                 self.args.size,
                 orig_shape=size,
@@ -134,7 +136,7 @@ class FFmpegProcessor:
 
         if self.args.crf is not None:
             output_kwargs.append(f"-crf {self.args.crf}")
-        
+
         output_f = tempfile.NamedTemporaryFile(suffix=".mp4")
         ff = FFmpeg(
             inputs={f.name: None},

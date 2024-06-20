@@ -1,7 +1,6 @@
 import pyarrow as pa
 import pyarrow.csv as pa_csv
 import pandas as pd
-from threading import Semaphore
 from torch.utils.data import IterableDataset, DataLoader
 import tempfile
 import webdataset as wds
@@ -9,10 +8,10 @@ from queue import Queue
 import os, os.path as osp
 from functools import partial
 from pathos.multiprocessing import ProcessPool
+import multiprocessing as mp
 from time import time
 from huggingface_hub import HfApi
 import re
-from multiprocessing import Semaphore
 
 
 from tqdm import tqdm
@@ -20,7 +19,7 @@ from tqdm import tqdm
 from kv2d.sharder import ReadArguments, Sharder
 from kv2d.download import download_single, download_generator
 from kn_util.data.video import read_frames_decord
-from kn_util.utils.download import MultiThreadDownloader, get_hf_headers
+from kn_util.utils.download import MultiThreadDownloader, get_hf_headers, CoroutineDownloader
 
 
 class WDSShardIterDataset(IterableDataset):
@@ -61,20 +60,19 @@ class WDSShardIterDataset_HFDL(IterableDataset):
             yield url, wds.WebDataset(path)
 
 
-def _download(url, downloader):
+def _download(url, downloader, semaphore):
+    semaphore.acquire()
     print(f"Start downloading {url}")
-
     st = time()
     with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as f:
         downloader.download(url, f.name)
-
         print(f"Downloaded {url} in {time() - st:.2f}s")
         return url, wds.WebDataset(f.name)
 
 
-class ShardIterDataset_MP(IterableDataset):
+class ShardIterDataset(IterableDataset):
     """IterableDataset for reading shards from LFS repo
-    Use DataLoader to prefetch shards online
+    Use pathos ProcessPool to prefetch shards online
     Args:
         urls (List[str]): list of urls to download
         num_threads (int): number of threads for downloading
@@ -85,25 +83,30 @@ class ShardIterDataset_MP(IterableDataset):
         sample if return_meta is False
     """
 
-    def __init__(self, urls, num_threads=16, prefetch_factor=2, ordered=True, return_meta=False):
+    def __init__(self, urls, num_threads=16, num_workers=4, prefetch_factor=2, ordered=True, return_meta=False):
         self.urls = urls
-        self.downloader = MultiThreadDownloader(num_threads=num_threads, headers=get_hf_headers(), verbose=0)
-        self.num_workers = 1
+        self.downloader = CoroutineDownloader(headers=get_hf_headers(), verbose=0)
+        # TODO: add prefetch_factor to prevent downloading too many shards
+        self.num_workers = num_workers
         self.return_meta = return_meta
         self.ordered = ordered
+        manager = mp.Manager()
+        self.semaphore = manager.Semaphore(prefetch_factor)
 
     def __iter__(self):
         with ProcessPool(self.num_workers) as p:
             map_func = p.imap if self.ordered else p.uimap
-            for url, shard in map_func(partial(_download, downloader=self.downloader), self.urls):
+            func = partial(_download, downloader=self.downloader, semaphore=self.semaphore)
+            for url, shard in map_func(func, self.urls):
                 for idx, sample in enumerate(shard):
                     if self.return_meta:
                         yield url, idx, sample
                     else:
                         yield sample
+                self.semaphore.release()
 
 
-class ShardIterDataset(IterableDataset):
+class ShardIterDataset_DL(IterableDataset):
     """IterableDataset for reading shards from LFS repo
     Use DataLoader to prefetch shards online
     Args:

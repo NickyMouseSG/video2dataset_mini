@@ -126,11 +126,6 @@ def get_upload_args(args):
 
 def main_per_rank(args):
 
-    # if args.timestamp_col is not None:
-    #     logger.info("Forced to set args.download_only and args.process_download to True when using timestamp_col")
-    #     args.download_only = True
-    #     args.process_download = True
-
     os.makedirs(osp.join(args.output_dir, ".meta"), exist_ok=True)
     os.makedirs(osp.dirname(osp.abspath(args.log_file)), exist_ok=True)
 
@@ -176,6 +171,10 @@ def main():
 
     args = get_args()
     setup_logger_loguru(filename=args.log_file, logger=logger)
+
+    if args.debug:
+        args.semaphore_limit = 1
+        args.num_threads = 1
 
     if args.rank_split > 1:
         # this means even single rank of data is too large for storage
