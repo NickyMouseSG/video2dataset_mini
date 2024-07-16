@@ -6,7 +6,7 @@ import io
 from decord import VideoReader
 
 from typing import Union
-from datetime import datetime
+from datetime import datetime, timedelta
 import ffmpeg
 from typing import Any, List, Tuple, Dict, Literal
 import glob
@@ -15,14 +15,45 @@ import cv2
 import numpy as np
 from pprint import pprint
 from loguru import logger
+from scenedetect import detect, AdaptiveDetector
 
-from kn_util.data.video import get_frame_indices, fill_temporal_param, probe_meta
+from kn_util.data.video import get_frame_indices, fill_temporal_param, probe_meta, save_video_ffmpeg
 from kn_util.utils.system import run_cmd
+
+
+class ComposedProcessor:
+    def __init__(self, processors):
+        self.processors = processors
+
+    def __call__(self, byte_stream, meta):
+        for processor in self.processors:
+            if isinstance(byte_stream, list):
+                byte_streams = []
+                metas = []
+                for bs, m in zip(byte_stream, meta):
+                    bs, m = processor(bs, m)
+
+                    if isinstance(bs, list):
+                        byte_streams.extend(bs)
+                        metas.extend(m)
+                    else:
+                        byte_streams.append(bs)
+                        metas.append(m)
+                byte_stream = byte_streams
+                meta = metas
+            else:
+                byte_stream, meta = processor(byte_stream, meta)
+        return byte_stream, meta
 
 
 def get_processor(process_args, media="video"):
     if media == "video":
-        processor = FFmpegProcessor(process_args=process_args)
+        processors = [FFmpegProcessor(process_args=process_args)]
+        if process_args.scene_detect:
+            processors = [SceneCutProcessor()] + processors
+
+        processor = ComposedProcessor(processors)
+
     elif media == "image":
         processor = CV2Processor(process_args=process_args)
     else:
@@ -57,6 +88,8 @@ class ImageProcessArgs:
 class VideoProcessArgs(ImageProcessArgs):
     fps: int = None
     crf: int = None
+
+    scene_detect: bool = False
 
 
 # class DecordProcessor:
@@ -99,29 +132,24 @@ class VideoProcessArgs(ImageProcessArgs):
 
 
 class FFmpegProcessor:
+
     def __init__(self, process_args: VideoProcessArgs, num_threads=4):
         self.args = process_args
         self.num_threads = num_threads
 
-    def get_size(self, path):
-        size = None
-        video_meta = probe_meta(path)
-
-        if video_meta is None:
-            raise ValueError(f"Failed to get video meta: {path}, seems like a corrupted video file")
-
-        size = video_meta["width"], video_meta["height"]
-
-        return size
-
-    def __call__(self, byte_stream):
+    def __call__(self, byte_stream, meta):
         f = tempfile.NamedTemporaryFile(suffix=".mp4")
         f.write(byte_stream)
 
         output_kwargs = []
 
+        try:
+            video_meta = probe_meta(f.name)
+        except Exception as e:
+            raise ValueError(f"Failed to get video meta: {f.name}, {e}")
+
         if self.args.size is not None:
-            size = self.get_size(f.name)
+            size = video_meta["width"], video_meta["height"]
 
             target_size = _get_target_size(
                 self.args.size,
@@ -131,33 +159,46 @@ class FFmpegProcessor:
             )
             output_kwargs.append(f"-vf scale={target_size[0]}:{target_size[1]}")
 
+            video_meta["width"], video_meta["height"] = target_size
+
         if self.args.fps is not None:
             output_kwargs.append(f"-r {self.args.fps}")
+            video_meta["fps"] = self.args.fps
 
         if self.args.crf is not None:
             output_kwargs.append(f"-crf {self.args.crf}")
+            video_meta["crf"] = self.args.crf
 
         output_f = tempfile.NamedTemporaryFile(suffix=".mp4")
         ff = FFmpeg(
             inputs={f.name: None},
             outputs={output_f.name: " ".join(output_kwargs)},
-            global_options=" ".join(["-hide_banner", "-loglevel error", "-y", f"-threads {self.num_threads}"]),
+            global_options=" ".join(
+                [
+                    "-hide_banner",
+                    "-loglevel error",
+                    "-y",
+                    f"-threads {self.num_threads}",
+                ]
+            ),
         )
         popen_output = run_cmd(ff.cmd)
         popen_output.check_returncode()
+
         video_bytes = output_f.read()
+        meta.update(video_meta)
 
         f.close()
         output_f.close()
 
-        return video_bytes
+        return video_bytes, meta
 
 
 class CV2Processor:
     def __init__(self, process_args: ImageProcessArgs):
         self.args = process_args
 
-    def __call__(self, byte_stream):
+    def __call__(self, byte_stream, meta):
         nparr = np.fromstring(byte_stream, np.uint8)
         img_np = cv2.imdecode(nparr, cv2.CV_LOAD_IMAGE_COLOR)
         target_size = _get_target_size(
@@ -168,4 +209,78 @@ class CV2Processor:
         img_np = cv2.resize(img_np, target_size[::-1], interpolation=cv2.INTER_LINEAR)
         byte_stream = cv2.imencode(".jpg", img_np)[1].tostring()
 
+        return byte_stream, meta
+
+
+class SceneCutProcessor:
+    def __init__(self, threshold=3.5, min_scene_duration=2.0, num_threads=4):
+        self.threshold = threshold
+        self.num_threads = num_threads
+        self.min_scene_duration = min_scene_duration
+
+    def split_by_ffmpeg(self, video_path, st, ed, fps):
+
+        duration = ed - st
+        st = str(timedelta(seconds=st / fps, microseconds=1))[:-3]
+        ed = str(timedelta(seconds=ed / fps, microseconds=1))[:-3]
+        # duration = str(timedelta(seconds=duration / fps, microseconds=1))[:-3]
+
+        output_f = tempfile.NamedTemporaryFile(suffix=".mp4")
+        ff = FFmpeg(
+            inputs={video_path: None},
+            outputs={output_f.name: f"-ss {st} -to {ed}"},
+            global_options=f"-hide_banner -loglevel error -y -threads {self.num_threads}",
+        )
+        popen_output = run_cmd(ff.cmd)
+        popen_output.check_returncode()
+
+        byte_stream = output_f.read()
+        output_f.close()
         return byte_stream
+
+    def split_by_decord(self, vr, st, ed, fps):
+        output_f = tempfile.NamedTemporaryFile(suffix=".mp4")
+        frames = vr.get_batch(list(range(st, ed))).asnumpy()
+        save_video_ffmpeg(frames, output_f.name, crf=0, fps=fps)
+        return output_f.read()
+
+    def __call__(self, byte_stream, meta):
+
+        f = tempfile.NamedTemporaryFile(suffix=".mp4")
+        f.write(byte_stream)
+
+        cap = cv2.VideoCapture(f.name)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+
+        detector = AdaptiveDetector(adaptive_threshold=self.threshold)
+        scene_list = detect(f.name, detector=detector, start_in_scene=True)
+
+        if len(scene_list) == 1:
+            return [byte_stream], [meta]
+
+        byte_streams = []
+        metas = []
+
+        # vr = VideoReader(f.name, num_threads=1)
+        # frame_count = len(vr)
+
+        for idx, scene in enumerate(scene_list):
+            st = scene[0].get_frames()
+
+            ed = scene[1].get_frames()
+
+            # avoid overlapping scenes
+            if idx != 0:
+                st += 2
+            if idx != len(scene_list) - 1:
+                ed -= 2
+
+            if ed - st < fps * self.min_scene_duration:
+                continue
+
+            byte_streams.append(self.split_by_ffmpeg(f.name, st, ed, fps))
+            metas.append({**meta, "timestamps": f"{st / fps}-{ed / fps}"})
+
+        f.close()
+
+        return byte_streams, metas

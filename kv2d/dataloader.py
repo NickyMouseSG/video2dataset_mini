@@ -138,7 +138,7 @@ class ShardIterDataset_DL(IterableDataset):
                     yield sample
 
 
-class OnlineIterDataset(IterableDataset):
+class VideoIterDataset(IterableDataset):
     """IterableDataset for downloading and reading online files on the fly
     Args:
         file_paths (str): path to the file containing urls
@@ -203,20 +203,3 @@ class OnlineIterDataset(IterableDataset):
                         print(f"Error reading {_id}")
                 else:
                     print(f"Error downloading {_id}")
-
-
-if __name__ == "__main__":
-    read_args = ReadArguments(headers=True, url_col="contentUrl", id_col="videoid")
-    dataloader = VideoIterDataset(
-        file_paths="data/url/mini.tsv",
-        read_args=read_args,
-        fps=2,
-        size=224,
-        num_threads=16,
-        semaphore_limit=16,
-        pin_memory=True,
-        num_workers=32,
-    )
-
-    for sample in tqdm(dataloader):
-        pass

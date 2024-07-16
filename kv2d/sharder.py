@@ -85,7 +85,7 @@ class Sharder:
             yield self.read_single(input_file, read_args)
 
     def write_shards_single(self, df, shard_size=1000, shard_dir=".", shard_idx_offset=0):
-        num_samples = len(df) - 1
+        num_samples = len(df)
         num_shards = (num_samples + shard_size - 1) // shard_size
         num_logits = len(str(num_shards))
 
@@ -109,7 +109,7 @@ class Sharder:
             local_shard_ids = [i for i in local_shard_ids if i in self.read_args.include_shard_ids]
             logger.info(f"Applying Shard IDs Filter, got {len(local_shard_ids)} shards in rank {self.rank_id}.")
         self.local_shard_ids = local_shard_ids
-        shard_spans = [(1 + i * shard_size, min(1 + (i + 1) * shard_size, len(df))) for i in local_shard_ids]
+        shard_spans = [(i * shard_size, min(1 + (i + 1) * shard_size, len(df))) for i in local_shard_ids]
         # here 1+ is used to skip the header
         local_df_shards = [df.slice(start, end - start) for start, end in shard_spans]
 
@@ -190,7 +190,7 @@ class Sharder:
         #     vid = vid[1:]
         #     timestamps = timestamps[1:] if timestamps else None
 
-        meta = [{k: shard_df[k][i] for k in column_names} for i in range(shard_size)]
+        meta = [{k: shard_df[k][i].as_py() for k in column_names} for i in range(shard_size)]
 
         return (url, vid, timestamps, meta)
 

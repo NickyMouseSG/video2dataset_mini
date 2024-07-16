@@ -15,6 +15,7 @@ import multiprocessing
 import pandas as pd
 import time
 from huggingface_hub import HfApi
+from huggingface_hub.utils import RepositoryNotFoundError
 from torchvision import transforms as IT
 from PIL import Image
 import io
@@ -205,9 +206,9 @@ def download_generator(
             retry_cnt = future._input["retry_cnt"]
 
             if errorcode == 0:
-                yield _id, video_bytes, errorcode
+                yield _id, video_bytes, meta, errorcode
             else:
-                yield _id, None, errorcode
+                yield _id, None, meta, errorcode
                 if retry_cnt + 1 < max_retries:
                     submit_job(url, _id, timestamp, meta, retry_cnt=retry_cnt + 1)
             semaphore.release()
@@ -293,24 +294,36 @@ def download_shard(
         max_retries=max_retries,
     )
 
-    def process(_id, byte_stream, errorcode):
+    def process_and_write(_id, byte_stream, meta, errorcode):
         # or message_queue won't work
         nonlocal message_queue, success
 
         if errorcode != 0:
             return
-
+        
         try:
             if process_args.skip_process:
-                byte_writer.write(key=_id, array=byte_stream, fmt="mp4")
+                byte_writer.write(key=_id, array=byte_stream, meta=meta, fmt="mp4")
             else:
                 try:
-                    byte_stream = processor(byte_stream)
+                    byte_stream, meta = processor(byte_stream, meta)
                 except Exception as e:
+                    logger.debug("Entering debugging!")
+                    # from pudb.remote import set_trace; set_trace()
                     raise ValueError(f"Error while processing {_id}: {e}")
+
                 try:
-                    byte_writer.write(key=_id, array=byte_stream, fmt="mp4")
+                    if byte_stream is None:
+                        raise ValueError(f"Error while processing {_id}: {e}")
+                    elif isinstance(byte_stream, (bytearray, bytes)):
+                        byte_writer.write(key=_id, array=byte_stream, meta=meta, fmt="mp4")
+                    elif isinstance(byte_stream, list) and len(byte_stream) > 0 and isinstance(byte_stream[0], (bytearray, bytes)):
+                        # notice here len(byte_stream) can be 0 when all segments are too short and filtered by scenedetect
+                        for i, (bs, m) in enumerate(zip(byte_stream, meta)):
+                            byte_writer.write(key=f"{_id}_{i}", array=bs, meta=m, fmt="mp4")
                 except Exception as e:
+                    logger.debug("Entering debugging!")
+                    # from pudb.remote import set_trace; set_trace()
                     raise ValueError(f"Error while writing {_id}: {e}")
 
             success += 1
@@ -318,29 +331,20 @@ def download_shard(
 
             # vid_writer.write(vid)
         except Exception as e:
-            # TODO: something wrong here
-            # TypeError("'<' not supported between instances of 'NoneType' and 'NoneType'")
+            logger.error(e)
             error_writer.write("\t".join([_id, str(e)]))
             return
 
     # =================== DEBUG ======================
     if debug:
         print(f"shard_id: {shard_id}")
-        for _id, byte_stream, errorcode in tqdm(download_gen):
-            # video_bytes, errorcode, msg = download_single(
-            #     url=url_shard[i],
-            #     timestamp=timestamp_shard[i],
-            #     size=process_args.size,
-            #     semaphore=Semaphore(1),
-            #     media=media,
-            # )
-            # _id = id_shard[i]
-            process(_id, byte_stream, errorcode)
+        for _id, byte_stream, meta, errorcode in tqdm(download_gen):
+            process_and_write(_id, byte_stream, meta, errorcode)
     # ================================================
 
-    for _id, byte_stream, errorcode in download_gen:
+    for _id, byte_stream, meta, errorcode in download_gen:
         try:
-            process(_id, byte_stream, errorcode)
+            process_and_write(_id, byte_stream, meta, errorcode)
         except Exception as e:
             print(f"Error while processing {_id}: {e}")
 
@@ -401,6 +405,18 @@ def maybe_upload(output_dir, tar_filenames, upload_args):
             # failproof to multiple uploads
             try:
                 hf_api = HfApi()
+
+                # test whether the repo exists
+                try:
+                    hf_api.repo_info(repo_id=upload_args.repo_id, repo_type="dataset")
+                except RepositoryNotFoundError:
+                    hf_api.create_repo(
+                        repo_id=upload_args.repo_id,
+                        private=True,
+                        repo_type="dataset",
+                    )
+                    print(f"Created repo {upload_args.repo_id}")
+
                 hf_api.upload_folder(
                     repo_id=upload_args.repo_id,
                     folder_path=output_dir,
@@ -503,16 +519,24 @@ def download(
     # ======================== DEBUG ========================
     if debug:
         for local_shard_id in local_shard_ids:
+            global_shard_id = sharder.get_global_id(local_shard_id)
+            tar_path = osp.join(output_dir, shardid2name(global_shard_id) + ".tar")
+            cache_dir = osp.join(output_dir, "cache." + shardid2name(global_shard_id))
+            downloaded_but_not_uploaded = osp.exists(tar_path) and not osp.exists(cache_dir)
+            if downloaded_but_not_uploaded:
+                logger.info(f"Shard {global_shard_id} already downloaded (maybe not uploaded)")
+                continue
             launch_job(local_shard_id)
     # ======================================================
 
     not_done = set()
     for shard_id in local_shard_ids:
-        tar_path = osp.join(output_dir, shardid2name(shard_id) + ".tar")
-        cache_dir = osp.join(output_dir, "cache." + shardid2name(shard_id))
+        global_shard_id = sharder.get_global_id(shard_id)
+        tar_path = osp.join(output_dir, shardid2name(global_shard_id) + ".tar")
+        cache_dir = osp.join(output_dir, "cache." + shardid2name(global_shard_id))
         downloaded_but_not_uploaded = osp.exists(tar_path) and not osp.exists(cache_dir)
         if downloaded_but_not_uploaded:
-            logger.info(f"Shard {shard_id} already downloaded (maybe not uploaded)")
+            logger.info(f"Shard {global_shard_id} already downloaded (maybe not uploaded)")
             continue
 
         future = executor.apipe(launch_job, local_shard_id=shard_id)
@@ -547,6 +571,7 @@ def download(
     # Here finished means downloaded, processed and (maybe) uploaded
     with safe_open(finished_shard_meta, "a") as f:
         f.write("\n".join(finished_rows) + "\n")
+        f.flush()
 
     df = pd.read_csv(finished_shard_meta, names=["shard_id", "success", "total"], delimiter="\t")
     total_downloaded = df["total"].sum()

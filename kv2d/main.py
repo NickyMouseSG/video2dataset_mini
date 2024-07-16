@@ -60,6 +60,7 @@ def get_args():
     parser.add_argument("--resize_mode", type=str, default="shortest", help="Mode for resizing the video")
     parser.add_argument("--crf", type=int, default=None, help="CRF value for the output video")
     parser.add_argument("--fps", type=int, default=24, help="Frames per second for the output video")
+    parser.add_argument("--scene_detect", action="store_true", help="Detect scene cuts in the video", default=False)
 
     # Writer Arguments
     parser.add_argument("--writer", type=str, default="file", help="Writer to use for saving videos")
@@ -93,6 +94,7 @@ def get_process_args(args):
             resize_mode=args.resize_mode,
             crf=args.crf,
             fps=args.fps,
+            scene_detect=args.scene_detect,
         )
     elif args.media == "image":
         process_args = ImageProcessArgs(

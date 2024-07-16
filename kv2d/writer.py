@@ -10,11 +10,13 @@ from loguru import logger
 from PIL import Image
 import json
 from dataclasses import dataclass
+from shutil import rmtree
 
 from .utils import safe_open
 
 from kn_util.utils.system import run_cmd, force_delete_dir
 from kn_util.data.video import save_video_imageio, array_to_video_bytes, save_video_ffmpeg
+from kn_util.utils.io import load_json
 
 
 @dataclass
@@ -64,32 +66,40 @@ class FileWriter:
     def upload(self):
         raise NotImplementedError
 
-    def write(self, key, array, fmt="mp4", video_meta=None):
+    def write(self, key, array, meta, fmt="mp4", video_meta=None):
         assert isinstance(array, (bytearray, bytes)), f"Invalid array type: {type(array)}"
-        if isinstance(array, (bytearray, bytes)):
-            with open(osp.join(self.cache_dir, f"{key}.{fmt}"), "wb") as f:
-                f.write(array)
-            return
+        tmpdir = tempfile.TemporaryDirectory()
+        tmpfile = osp.join(tmpdir.name, f"{key}.{fmt}")
+        with safe_open(tmpfile, "wb") as f:
+            f.write(array)
 
-        # ! Deprecated
-        if False:
-            cache_file = osp.join(self.cache_dir, f"{key}.{fmt}")
-            with tempfile.NamedTemporaryFile(suffix="." + fmt, delete=False) as f:
-                if self.media == "video":
-                    save_video_ffmpeg(array, f.name, fps=video_meta["fps"], crf=self.process_args.crf)
-                    # save_video_imageio(array, f.name, fps=video_meta["fps"], quality=self.quality)
-                elif self.media == "image":
-                    Image.fromarray(array).save(f.name)
-                else:
-                    raise ValueError(f"Invalid media type: {self.media}")
-                run_cmd(f"mv {f.name} {cache_file}")
+        tmpfile_json = osp.join(tmpdir.name, f"{key}.json")
+        with safe_open(tmpfile_json, "w") as f:
+            json.dump(meta, f, indent=4)
+
+        run_cmd(f"mv {tmpdir.name}/* {self.cache_dir}/")
+
+        file_path = osp.join(self.cache_dir, f"{key}.{fmt}")
+        json_path = osp.join(self.cache_dir, f"{key}.json")
+        if not (osp.exists(json_path) and osp.getsize(json_path) > 0) or not (osp.exists(file_path) and osp.getsize(file_path) > 0):
+            run_cmd(f"rm -rf {json_path} {file_path}")
+            raise FileNotFoundError(f"File not found: {json_path} or {file_path}")
+
+        return
 
     @property
     def downloaded_ids(self):
         cache_files = set(os.listdir(self.cache_dir))
+        has_video_ids = set([f.split(".", 1)[0] for f in cache_files if not f.endswith(".json")])
+        has_json_ids = set([f.split(".", 1)[0] for f in cache_files if f.endswith(".json")])
+
         downloaded_ids = set()
-        for cache_file in cache_files:
-            key, _ = cache_file.split(".")
+        for key in has_video_ids:
+
+            if key not in has_json_ids:
+                # json file is lost, download it again
+                continue
+
             downloaded_ids.add(key)
 
         return downloaded_ids
@@ -111,18 +121,40 @@ class CachedTarWriter(FileWriter):
         cur_dir = osp.dirname(self.tar_file)
         key_file = osp.join(cur_dir, "keys.json")
         tar_filename = osp.basename(self.tar_file)
+        tempf = tempfile.NamedTemporaryFile(suffix=".tar", delete=False)
 
-        writer = wds.TarWriter(open(self.tar_file, "wb"))
+        writer = wds.TarWriter(tempf)
+        writer_meta = wds.TarWriter(osp.join(cur_dir, ".meta", tar_filename), "wb")
         keys = []
 
         cache_files = sorted(os.listdir(self.cache_dir))
-        for cache_file in cache_files:
-            with open(osp.join(self.cache_dir, cache_file), "rb") as f:
-                video_bytes = f.read()
-                key, fmt = cache_file.split(".")
-                writer.write({"__key__": key, fmt: video_bytes})
-                keys.append(key)
+        cache_files_groupby_ids = {}
+        cache_ids = set()
 
+        # group cache files by cache_id
+        for cache_file in cache_files:
+            cache_id = cache_file.rsplit(".", 1)[0]
+            cache_ids.add(cache_id)
+            cache_files_groupby_ids[cache_id] = cache_files_groupby_ids.get(cache_id, [])
+            cache_files_groupby_ids[cache_id].append(cache_file)
+
+        for cache_id in cache_ids:
+            item = {"__key__": cache_id}
+            # deal with different formats
+            for cache_file in cache_files_groupby_ids[cache_id]:
+                fmt = cache_file.rsplit(".", 1)[1]
+                if fmt in ["mp4"]:
+                    item[fmt] = open(osp.join(self.cache_dir, cache_file), "rb").read()
+                if fmt in ["json"]:
+                    item[fmt] = load_json(osp.join(self.cache_dir, cache_file))
+            writer.write(item)
+            writer_meta.write({"__key__": cache_id, "json": item["json"]})
+            keys.append(cache_id)
+
+        writer.close()
+        writer_meta.close()
+
+        run_cmd(f"mv {tempf.name} {self.tar_file}")
         run_cmd(f"rm -rf {self.cache_dir}", async_cmd=False)
 
         if not osp.exists(key_file):
@@ -139,7 +171,7 @@ class CachedTarWriter(FileWriter):
 
                 f.seek(0)
                 f.truncate()
-                json.dump(json_dict, f, indent=4)
+                json.dump(json_dict, f)
 
     def finish(self):
         return osp.exists(self.tar_file) and not osp.exists(self.cache_dir)
