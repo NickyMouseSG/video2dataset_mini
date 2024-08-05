@@ -3,9 +3,10 @@ from kn_util.utils.multiproc import map_async_with_thread
 import pyarrow.csv as pa_csv
 import pyarrow.feather as pa_feather
 import pandas as pd
-import os
+import os, os.path as osp
 from loguru import logger
 from dataclasses import dataclass
+from kn_util.utils.system import get_filehash, is_valid_file
 
 
 @dataclass
@@ -33,6 +34,7 @@ class Sharder:
         self.read_args = read_args
         df_gen = self.read(input_file, read_args)
 
+        shard_dir = osp.join(shard_dir, get_filehash(input_file))
         os.makedirs(shard_dir, exist_ok=True)
 
         self.rank_id = rank_id
@@ -84,7 +86,7 @@ class Sharder:
         else:
             yield self.read_single(input_file, read_args)
 
-    def write_shards_single(self, df, shard_size=1000, shard_dir=".", shard_idx_offset=0):
+    def write_shards_single_shard(self, df, shard_size=1000, shard_dir=".", shard_idx_offset=0):
         num_samples = len(df)
         num_shards = (num_samples + shard_size - 1) // shard_size
         num_logits = len(str(num_shards))
@@ -123,7 +125,9 @@ class Sharder:
             ),
             verbose=False,
         )
-        logger.info(f"Input data ({num_samples} rows) has been sharded into {len(local_shard_ids)} / {num_shards} shards in rank {self.rank_id}.")
+        logger.info(
+            f"Input data ({num_samples} rows) has been sharded into {len(local_shard_ids)} / {num_shards} shards in rank {self.rank_id}."
+        )
 
         return shard_files, num_shards, len(df)
 
@@ -132,8 +136,11 @@ class Sharder:
         self._row_count = 0
         shard_idx_offset = 0
         for df in df_gen:
-            cur_shard_files, cur_num_shards, cur_row_count = self.write_shards_single(
-                df, shard_size=shard_size, shard_dir=shard_dir, shard_idx_offset=shard_idx_offset
+            cur_shard_files, cur_num_shards, cur_row_count = self.write_shards_single_shard(
+                df,
+                shard_size=shard_size,
+                shard_dir=shard_dir,
+                shard_idx_offset=shard_idx_offset,
             )
             self._row_count += cur_row_count
             shard_idx_offset += cur_num_shards
@@ -176,23 +183,32 @@ class Sharder:
 
         shard_df = pa_feather.read_table(self.shard_files[local_shard_id])
         column_names = set(shard_df.column_names)
-        column_names.remove(url_col)
-        column_names.remove(id_col)
         shard_size = len(shard_df)
 
-        url = shard_df[url_col].to_pylist()
-        vid = shard_df[id_col].to_pylist()
-        timestamps = shard_df[timestamp_col].to_pylist() if timestamp_col else None
+        def extract_meta(shard_df, column_name, target_column):
+            if column_name in column_names:
+                return shard_df[target_column].to_pylist()
+            else:
+                return None
 
-        # header has been skip before!! Don't skip again
-        # if self.read_args.headers:
-        #     url = url[1:]
-        #     vid = vid[1:]
-        #     timestamps = timestamps[1:] if timestamps else None
+        meta_list = []
 
-        meta = [{k: shard_df[k][i].as_py() for k in column_names} for i in range(shard_size)]
+        for row_i in range(len(shard_df)):
+            item = {}
+            for k in column_names:
+                mapping = {
+                    url_col: "<URL>",
+                    id_col: "<ID>",
+                    timestamp_col: "<TIMESTAMP>",
+                }
+                mapping = {k: v for k, v in mapping.items() if k is not None}
+                item[mapping.get(k, k)] = shard_df[k][row_i].as_py()
 
-        return (url, vid, timestamps, meta)
+            if "<TIMESTAMP>" in item:
+                item["<TIMESTAMP>"] = eval(item["<TIMESTAMP>"])
+            meta_list += [item]
+
+        return meta_list
 
     def __getitem__(self, shard_id):
         return self.fetch_shard(shard_id)

@@ -45,7 +45,7 @@ from kn_util.utils.system import run_cmd, force_delete_dir, clear_process_dir
 from kn_util.tools.lfs import upload_files
 
 
-def _download_single_youtube(url, size=256, timestamp=None):
+def _download_single_youtube(url, size=256):
     # use a fake logger to suppress output and capture error
     storage_logger = StorageLogger()
 
@@ -56,7 +56,6 @@ def _download_single_youtube(url, size=256, timestamp=None):
         url,
         video_format=video_format,
         logger=storage_logger,
-        timestamp=timestamp,
     )
 
     return video_bytes, errorcode, storage_logger.storage["error"]
@@ -133,16 +132,18 @@ def _download_single_ffmpeg(url, timestamp=None):
         return None, 1, str(e)
 
 
-def download_single(url, size, semaphore, timestamp=None, media="video"):
+def download_single(meta, size, semaphore, media="video"):
     _bytes = None
     errorcode = 0
     error_str = None
     semaphore.acquire()
 
+    url = meta["<URL>"]
+
     try:
         if media == "video":
             if not (url.endswith(".mp4") or url.endswith(".avi") or url.endswith(".mkv")):
-                _bytes, errorcode, error_str = _download_single_youtube(url, size=size, timestamp=timestamp)
+                _bytes, errorcode, error_str = _download_single_youtube(url, size=size)
             else:
                 _bytes, errorcode, error_str = _download_single_direct(url)
 
@@ -157,10 +158,7 @@ def download_single(url, size, semaphore, timestamp=None, media="video"):
 
 
 def download_generator(
-    url_shard,
-    id_shard,
-    timestamp_shard,
-    meta_shard,
+    shard,
     # download args
     size=360,
     media="video",
@@ -172,45 +170,41 @@ def download_generator(
     executor = ThreadPoolExecutor(num_threads)
     semaphore = Semaphore(semaphore_limit)
 
-    def submit_job(url, _id, timestamp, meta, retry_cnt=0):
+    def submit_job(meta, retry_cnt=0):
         future = executor.submit(
             download_single,
-            url=url,
+            meta=meta,
             size=size,
-            timestamp=timestamp,
             media=media,
             semaphore=semaphore,
         )
-        future._input = dict(meta=meta, id=_id, url=url, timestamp=timestamp, retry_cnt=retry_cnt)
+        future._input = dict(**meta, retry_cnt=retry_cnt)
         return future
 
     def submit_jobs(ids):
         futures = set()
         for i in ids:
-            future = submit_job(url_shard[i], id_shard[i], timestamp_shard[i], meta_shard[i], retry_cnt=0)
+            future = submit_job(shard[i])
             futures.add(future)
         return futures
 
     # first submit
-    not_done = submit_jobs(range(len(url_shard)))
+    not_done = submit_jobs(range(len(shard)))
 
     # polling
     while len(not_done) > 0:
         done, not_done = wait(not_done, return_when=FIRST_COMPLETED, timeout=1.0)
         for future in done:
             video_bytes, errorcode, error = future.result()
-            url = future._input["url"]
-            meta = future._input["meta"]
-            _id = future._input["id"]
-            timestamp = future._input["timestamp"]
-            retry_cnt = future._input["retry_cnt"]
+            retry_cnt = future._input.pop("retry_cnt")
+            meta = future._input
 
             if errorcode == 0:
-                yield _id, video_bytes, meta, errorcode
+                yield meta, video_bytes, errorcode
             else:
-                yield _id, None, meta, errorcode
+                yield meta, None, errorcode
                 if retry_cnt + 1 < max_retries:
-                    submit_job(url, _id, timestamp, meta, retry_cnt=retry_cnt + 1)
+                    submit_job(meta, retry_cnt=retry_cnt + 1)
             semaphore.release()
 
 
@@ -235,10 +229,7 @@ def filter_shard(vid_shard, url_shard, timestamp_shard, meta_shard, downloaded_i
 def download_shard(
     media,
     # input shards
-    url_shard,
-    id_shard,
-    timestamp_shard,
-    meta_shard,
+    shard,
     rank,
     process_args: ImageProcessArgs,
     upload_args: UploadArgs,
@@ -253,17 +244,13 @@ def download_shard(
     # message
     message_queue=None,
     # debug
-    profile=False,
     debug=False,
 ):
     os.makedirs(osp.join(output_dir, ".meta"), exist_ok=True)
     error_log = osp.join(output_dir, ".meta", f"{shard_id}.error")
 
-    total = len(url_shard)
+    total = len(shard)
     message_queue.put(("START", shard_id, total))
-
-    if timestamp_shard is None:
-        timestamp_shard = [None] * total
 
     # vid_writer = BufferedTextWriter(downloaded_ids, buffer_size=10)
     error_writer = BufferedTextWriter(error_log, buffer_size=1)
@@ -277,30 +264,27 @@ def download_shard(
 
     processor = get_processor(process_args, media=media)
 
-    id_shard, url_shard, timestamp_shard, meta_shard = filter_shard(
-        id_shard, url_shard, timestamp_shard, meta_shard, byte_writer.downloaded_ids
-    )
+    shard = [_ for _ in shard if _["<ID>"] not in byte_writer.downloaded_ids]
     success = len(byte_writer.downloaded_ids)
     message_queue.put(("PROGRESS", shard_id, success))
 
     download_gen = download_generator(
-        url_shard=url_shard,
-        id_shard=id_shard,
-        timestamp_shard=timestamp_shard,
-        meta_shard=meta_shard,
+        shard=shard,
         media=media,
         num_threads=num_threads,
         semaphore_limit=semaphore_limit,
         max_retries=max_retries,
     )
 
-    def process_and_write(_id, byte_stream, meta, errorcode):
+    def process_and_write(meta, byte_stream, errorcode):
         # or message_queue won't work
         nonlocal message_queue, success
 
+        _id = meta["<ID>"]
+
         if errorcode != 0:
             return
-        
+
         try:
             if process_args.skip_process:
                 byte_writer.write(key=_id, array=byte_stream, meta=meta, fmt="mp4")
@@ -338,14 +322,15 @@ def download_shard(
     # =================== DEBUG ======================
     if debug:
         print(f"shard_id: {shard_id}")
-        for _id, byte_stream, meta, errorcode in tqdm(download_gen):
-            process_and_write(_id, byte_stream, meta, errorcode)
+        for meta, byte_stream, errorcode in tqdm(download_gen):
+            process_and_write(meta, byte_stream, errorcode)
     # ================================================
 
-    for _id, byte_stream, meta, errorcode in download_gen:
+    for meta, byte_stream, errorcode in download_gen:
         try:
-            process_and_write(_id, byte_stream, meta, errorcode)
+            process_and_write(meta, byte_stream, errorcode)
         except Exception as e:
+            _id = meta["<ID>"]
             print(f"Error while processing {_id}: {e}")
 
     byte_writer.close()
@@ -463,7 +448,6 @@ def download(
     max_retries=3,
     semaphore_limit=128,
     # debug
-    profile=False,
     debug=False,
 ):
     manager = multiprocessing.Manager()
@@ -471,14 +455,11 @@ def download(
 
     def launch_job(local_shard_id):
 
-        url_shard, id_shard, timestamp_shard, meta_shard = sharder.fetch_shard(local_shard_id)
+        shard = sharder.fetch_shard(local_shard_id)
         global_shard_id = sharder.get_global_id(local_shard_id)
         _, success, total = download_shard(
             media=media,
-            url_shard=url_shard,
-            id_shard=id_shard,
-            timestamp_shard=timestamp_shard,
-            meta_shard=meta_shard,
+            shard=shard,
             rank=rank,
             output_dir=output_dir,
             process_args=process_args,
@@ -489,7 +470,6 @@ def download(
             semaphore_limit=semaphore_limit,
             num_threads=num_threads,
             message_queue=message_queue,
-            profile=profile,
             debug=debug,
         )
         return global_shard_id, success, total

@@ -17,7 +17,14 @@ from pprint import pprint
 from loguru import logger
 from scenedetect import detect, AdaptiveDetector
 
-from kn_util.data.video import get_frame_indices, fill_temporal_param, probe_meta, save_video_ffmpeg
+from kn_util.data.video import (
+    get_frame_indices,
+    fill_temporal_param,
+    probe_meta,
+    save_video_ffmpeg,
+    cut_video_clips,
+    parse_timestamp_to_secs,
+)
 from kn_util.utils.system import run_cmd
 
 
@@ -49,8 +56,10 @@ class ComposedProcessor:
 def get_processor(process_args, media="video"):
     if media == "video":
         processors = [FFmpegProcessor(process_args=process_args)]
-        if process_args.scene_detect:
-            processors = [SceneCutProcessor()] + processors
+        # if process_args.scene_detect:
+        #     processors = [SceneCutProcessor()] + processors
+        if process_args.clipping:
+            processors = [ClippingProcessor()] + processors
 
         processor = ComposedProcessor(processors)
 
@@ -90,6 +99,8 @@ class VideoProcessArgs(ImageProcessArgs):
     crf: int = None
 
     scene_detect: bool = False
+    clipping: bool = False
+    timestamp_type: str = "datetime"
 
 
 # class DecordProcessor:
@@ -212,6 +223,50 @@ class CV2Processor:
         return byte_stream, meta
 
 
+def parse_timesteps(timestamps):
+
+    ret_timesteps = []
+    for idx, line_split in enumerate(timestamps):
+        st, ed = map(parse_timestamp_to_secs, line_split)
+        ret_timesteps += [(st, ed)]
+
+    return ret_timesteps
+
+
+class ClippingProcessor:
+    def __init__(self, with_audio=False):
+        self.with_audio = with_audio
+
+    def __call__(self, byte_stream, meta):
+
+        f = tempfile.NamedTemporaryFile(suffix=".mp4")
+        f.write(byte_stream)
+
+        timestamps = parse_timesteps(meta["<TIMESTAMP>"])
+
+        byte_streams = []
+        metas = []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cut_video_clips(
+                video_path=f.name,
+                timestamps=timestamps,
+                output_dir=tmpdir,
+                with_audio=self.with_audio,
+            )
+            mp4_files = sorted(glob.glob(osp.join(tmpdir, "*")))
+            for i, mp4_file in enumerate(mp4_files):
+                byte_streams.append(open(mp4_file, "rb").read())
+                meta_copy = copy.deepcopy(meta)
+                meta_copy["<TIMESTAMP>"] = "-".join(map(str, timestamps[i]))
+                meta_copy["<SEGMENT>"] = i
+                metas += [meta_copy]
+
+        f.close()
+
+        return byte_streams, metas
+
+
 class SceneCutProcessor:
     def __init__(self, threshold=3.5, min_scene_duration=2.0, num_threads=4):
         self.threshold = threshold
@@ -255,32 +310,6 @@ class SceneCutProcessor:
         detector = AdaptiveDetector(adaptive_threshold=self.threshold)
         scene_list = detect(f.name, detector=detector, start_in_scene=True)
 
-        if len(scene_list) == 1:
-            return [byte_stream], [meta]
+        meta["<SCENECUT>"] = scene_list
 
-        byte_streams = []
-        metas = []
-
-        # vr = VideoReader(f.name, num_threads=1)
-        # frame_count = len(vr)
-
-        for idx, scene in enumerate(scene_list):
-            st = scene[0].get_frames()
-
-            ed = scene[1].get_frames()
-
-            # avoid overlapping scenes
-            if idx != 0:
-                st += 2
-            if idx != len(scene_list) - 1:
-                ed -= 2
-
-            if ed - st < fps * self.min_scene_duration:
-                continue
-
-            byte_streams.append(self.split_by_ffmpeg(f.name, st, ed, fps))
-            metas.append({**meta, "timestamps": f"{st / fps}-{ed / fps}"})
-
-        f.close()
-
-        return byte_streams, metas
+        return byte_stream, meta

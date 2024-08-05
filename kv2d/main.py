@@ -10,6 +10,9 @@ from .process import VideoProcessArgs, ImageProcessArgs
 from .writer import UploadArgs
 
 from kn_util.utils.system import run_cmd
+from kn_util.utils.debug import setup_debugpy
+
+setup_debugpy(force=True)
 
 
 def get_args():
@@ -50,6 +53,7 @@ def get_args():
     parser.add_argument("--url_col", type=str, default="url", help="Column name for video URLs")
     parser.add_argument("--id_col", type=str, default="id", help="Column name for video IDs")
     parser.add_argument("--timestamp_col", type=str, default=None, help="Column name for timestamps")
+    parser.add_argument("--timestamp_type", type=str, default="datetime", help="Type of timestamps")
     parser.add_argument("--include_shard_ids", nargs="+", default=None, help="Shard IDs to include")
 
     # Process Arguments
@@ -79,7 +83,6 @@ def get_args():
     parser.add_argument("--delete_local", action="store_true", help="Delete the local videos after uploading", default=False)
 
     # Debug Arguments
-    parser.add_argument("--profile", action="store_true", help="Profile the download process", default=False)
     parser.add_argument("--debug", action="store_true", help="Dry run the download process", default=False)
 
     return parser.parse_known_args()[0]
@@ -95,6 +98,7 @@ def get_process_args(args):
             crf=args.crf,
             fps=args.fps,
             scene_detect=args.scene_detect,
+            clipping=(args.timestamp_col is not None),
         )
     elif args.media == "image":
         process_args = ImageProcessArgs(
@@ -163,7 +167,6 @@ def main_per_rank(args):
         semaphore_limit=args.semaphore_limit,
         max_retries=args.max_retries,
         # debug
-        profile=args.profile,
         debug=args.debug,
     )
 
