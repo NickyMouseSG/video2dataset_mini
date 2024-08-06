@@ -42,7 +42,7 @@ from kn_util.utils.rich import get_rich_progress_mofn
 from kn_util.utils.download import MultiThreadDownloaderInMem, CoroutineDownloaderInMem
 from kn_util.utils.error import SuppressStdoutStderr
 from kn_util.utils.system import run_cmd, force_delete_dir, clear_process_dir
-from kn_util.tools.lfs import upload_files
+from kn_util.tools.lfs import upload_files, upload_files_until_success
 
 
 def _download_single_youtube(url, size=256):
@@ -202,6 +202,7 @@ def download_generator(
             if errorcode == 0:
                 yield meta, video_bytes, errorcode
             else:
+                logger.debug(f"Error while downloading {meta['<ID>']}: {error}")
                 yield meta, None, errorcode
                 if retry_cnt + 1 < max_retries:
                     submit_job(meta, retry_cnt=retry_cnt + 1)
@@ -293,7 +294,9 @@ def download_shard(
                     byte_stream, meta = processor(byte_stream, meta)
                 except Exception as e:
                     logger.debug("Entering debugging!")
-                    # from pudb.remote import set_trace; set_trace()
+                    from pudb.remote import set_trace
+
+                    set_trace()
                     raise ValueError(f"Error while processing {_id}: {e}")
 
                 try:
@@ -304,10 +307,12 @@ def download_shard(
                     elif isinstance(byte_stream, list) and len(byte_stream) > 0 and isinstance(byte_stream[0], (bytearray, bytes)):
                         # notice here len(byte_stream) can be 0 when all segments are too short and filtered by scenedetect
                         for i, (bs, m) in enumerate(zip(byte_stream, meta)):
-                            byte_writer.write(key=f"{_id}_{i}", array=bs, meta=m, fmt="mp4")
+                            byte_writer.write(key=f"{_id}_SEG_{i}", array=bs, meta=m, fmt="mp4")
                 except Exception as e:
                     logger.debug("Entering debugging!")
-                    # from pudb.remote import set_trace; set_trace()
+                    from pudb.remote import set_trace
+
+                    set_trace()
                     raise ValueError(f"Error while writing {_id}: {e}")
 
             success += 1
@@ -331,7 +336,7 @@ def download_shard(
             process_and_write(meta, byte_stream, errorcode)
         except Exception as e:
             _id = meta["<ID>"]
-            print(f"Error while processing {_id}: {e}")
+            logger.debug(f"Error while processing {_id}: {e}")
 
     byte_writer.close()
 
@@ -386,39 +391,11 @@ def maybe_upload(output_dir, tar_filenames, upload_args):
     logger.info(f"Found {len(tar_paths)} files to upload")
 
     if upload_args.upload_hf:
-        while True:
-            # failproof to multiple uploads
-            try:
-                hf_api = HfApi()
-
-                # test whether the repo exists
-                try:
-                    hf_api.repo_info(repo_id=upload_args.repo_id, repo_type="dataset")
-                except RepositoryNotFoundError:
-                    hf_api.create_repo(
-                        repo_id=upload_args.repo_id,
-                        private=True,
-                        repo_type="dataset",
-                    )
-                    print(f"Created repo {upload_args.repo_id}")
-
-                hf_api.upload_folder(
-                    repo_id=upload_args.repo_id,
-                    folder_path=output_dir,
-                    allow_patterns=tar_filenames,
-                    revision="main",
-                    repo_type="dataset",
-                )
-                break
-            except Exception as e:
-                logger.error(e)
-                time.sleep(10)
-
-        # cmd = (
-        #     f"HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli upload --repo-type dataset --private "
-        #     f"{upload_args.repo_id} {output_dir} --include {' '.join(tar_filenames)}"
-        # )
-        # run_cmd(cmd=cmd, verbose=True)
+        upload_files_until_success(
+            repo_id=upload_args.repo_id,
+            allow_patterns=tar_filenames,
+            output_dir=output_dir,
+        )
 
     if upload_args.upload_s3:
         ret = run_cmd(

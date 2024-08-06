@@ -3,7 +3,7 @@ import time
 import re
 import fcntl
 
-logits = 5
+logits = 8
 
 
 def shardid2name(shard_id):

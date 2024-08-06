@@ -56,8 +56,8 @@ class ComposedProcessor:
 def get_processor(process_args, media="video"):
     if media == "video":
         processors = [FFmpegProcessor(process_args=process_args)]
-        # if process_args.scene_detect:
-        #     processors = [SceneCutProcessor()] + processors
+        if process_args.scene_detect:
+            processors = [SceneCutProcessor()] + processors
         if process_args.clipping:
             processors = [ClippingProcessor()] + processors
 
@@ -273,32 +273,6 @@ class SceneCutProcessor:
         self.num_threads = num_threads
         self.min_scene_duration = min_scene_duration
 
-    def split_by_ffmpeg(self, video_path, st, ed, fps):
-
-        duration = ed - st
-        st = str(timedelta(seconds=st / fps, microseconds=1))[:-3]
-        ed = str(timedelta(seconds=ed / fps, microseconds=1))[:-3]
-        # duration = str(timedelta(seconds=duration / fps, microseconds=1))[:-3]
-
-        output_f = tempfile.NamedTemporaryFile(suffix=".mp4")
-        ff = FFmpeg(
-            inputs={video_path: None},
-            outputs={output_f.name: f"-ss {st} -to {ed}"},
-            global_options=f"-hide_banner -loglevel error -y -threads {self.num_threads}",
-        )
-        popen_output = run_cmd(ff.cmd)
-        popen_output.check_returncode()
-
-        byte_stream = output_f.read()
-        output_f.close()
-        return byte_stream
-
-    def split_by_decord(self, vr, st, ed, fps):
-        output_f = tempfile.NamedTemporaryFile(suffix=".mp4")
-        frames = vr.get_batch(list(range(st, ed))).asnumpy()
-        save_video_ffmpeg(frames, output_f.name, crf=0, fps=fps)
-        return output_f.read()
-
     def __call__(self, byte_stream, meta):
 
         f = tempfile.NamedTemporaryFile(suffix=".mp4")
@@ -310,6 +284,10 @@ class SceneCutProcessor:
         detector = AdaptiveDetector(adaptive_threshold=self.threshold)
         scene_list = detect(f.name, detector=detector, start_in_scene=True)
 
-        meta["<SCENECUT>"] = scene_list
+        scene_list_frames = [list(map(lambda x: x.get_frames(), item)) for item in scene_list]
+        scene_list_secs = [list(map(lambda x: x.get_seconds(), item)) for item in scene_list]
+
+        meta["<SCENECUT_FRAMES>"] = scene_list_frames
+        meta["<SCENECUT_SECS>"] = scene_list_secs
 
         return byte_stream, meta

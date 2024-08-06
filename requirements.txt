@@ -3,3 +3,8 @@ ffmpy
 ffmpeg
 imageio[ffmpeg]
 imageio
+torch
+torchvision
+scenedetect
+webdataset
+aiohttp

@@ -90,12 +90,11 @@ class FileWriter:
     @property
     def downloaded_ids(self):
         cache_files = set(os.listdir(self.cache_dir))
-        has_video_ids = set([f.split(".", 1)[0] for f in cache_files if not f.endswith(".json")])
-        has_json_ids = set([f.split(".", 1)[0] for f in cache_files if f.endswith(".json")])
+        has_video_ids = set([f.split("_SEG_", 1)[0] for f in cache_files if not f.endswith(".json")])
+        has_json_ids = set([f.split("_SEG_", 1)[0] for f in cache_files if f.endswith(".json")])
 
         downloaded_ids = set()
         for key in has_video_ids:
-
             if key not in has_json_ids:
                 # json file is lost, download it again
                 continue
@@ -180,7 +179,8 @@ class CachedTarWriter(FileWriter):
 def get_writer(writer, output_dir, shard_id, process_args, media="video"):
     from .utils import logits
 
-    cache_dir = osp.join(output_dir, f"cache.{shard_id:0{logits}d}")
+    # cache_dir = osp.join(output_dir, f"cache.{shard_id:0{logits}d}")
+    cache_dir = osp.join(output_dir, f"{shard_id:0{logits}d}")
     tar_file = osp.join(output_dir, f"{shard_id:0{logits}d}.tar")
     if writer == "file":
         logger.warning("Using file writer, upload_args will be ignored")
