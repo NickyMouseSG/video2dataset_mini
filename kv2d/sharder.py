@@ -111,7 +111,7 @@ class Sharder:
             local_shard_ids = [i for i in local_shard_ids if i in self.read_args.include_shard_ids]
             logger.info(f"Applying Shard IDs Filter, got {len(local_shard_ids)} shards in rank {self.rank_id}.")
         self.local_shard_ids = local_shard_ids
-        shard_spans = [(i * shard_size, min((i + 1) * shard_size, len(df))) for i in local_shard_ids]
+        shard_spans = [(1 + i * shard_size, min(1 + (i + 1) * shard_size, len(df))) for i in local_shard_ids]
         local_df_shards = [df.slice(start, end - start) for start, end in shard_spans]
 
         # prevent slice df in multiple threads, not safe

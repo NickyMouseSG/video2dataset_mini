@@ -2,32 +2,17 @@ from concurrent.futures import (
     ThreadPoolExecutor,
     wait,
     FIRST_COMPLETED,
-    ProcessPoolExecutor,
 )
 from threading import Semaphore
 from loguru import logger
 import tempfile
-from dataclasses import dataclass
-from typing import List
 import os, os.path as osp
 import pathos.multiprocessing as mp
 import multiprocessing
 import pandas as pd
 import time
-from huggingface_hub import HfApi
-from huggingface_hub.utils import RepositoryNotFoundError
-from torchvision import transforms as IT
-from PIL import Image
-import io
-import numpy as np
-import torch
-import sys
-from einops import rearrange
-import yt_dlp
 from ffmpy import FFmpeg, FFprobe
 from tqdm import tqdm
-from queue import Queue
-from glob import glob
 
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
@@ -36,13 +21,12 @@ from .sharder import Sharder
 from .utils import shardid2name, safe_open
 from .process import ImageProcessArgs, get_processor
 
-from kn_util.data.video import download_youtube_as_bytes, read_frames_decord
+from kn_util.data.video import download_youtube_as_bytes
 from kn_util.data.video.download import StorageLogger
 from kn_util.utils.rich import get_rich_progress_mofn
-from kn_util.utils.download import MultiThreadDownloaderInMem, CoroutineDownloaderInMem
-from kn_util.utils.error import SuppressStdoutStderr
-from kn_util.utils.system import run_cmd, force_delete_dir, clear_process_dir
-from kn_util.tools.lfs import upload_files, upload_files_until_success
+from kn_util.utils.download import CoroutineDownloaderInMem
+from kn_util.utils.system import run_cmd
+from kn_util.tools.lfs import upload_files_until_success
 
 
 def _download_single_youtube(url, size=256):
@@ -102,14 +86,10 @@ def _get_target_size(orig_size, size, mode="shortest", divisible_by=1):
     return target_size
 
 
-def _download_single_ffmpeg(url, timestamp=None):
+def _download_single_ffmpeg(url):
     try:
         with tempfile.NamedTemporaryFile(suffix=".mp4") as f:
             output_kwargs = ["-c copy"]
-            if timestamp is not None:
-                # st, ed = parse_timestamps(timestamp)
-                st, ed = timestamp.split("-")
-                output_kwargs += [f"-ss {st} -to {ed}"]
 
             output_kwargs = " ".join(output_kwargs)
 
@@ -143,6 +123,11 @@ def download_single(meta, size, semaphore, media="video"):
     try:
         if media == "video":
             if not (url.endswith(".mp4") or url.endswith(".avi") or url.endswith(".mkv")):
+                # video_format = f"wv*[height>={size}][ext=mp4]/" f"w[height>={size}][ext=mp4]/" "bv/b[ext=mp4]"
+                # url, errorcode, error_str = get_youtube_direct_url(url, video_format=video_format, quiet=True)
+                # if errorcode != 0:
+                #     return None, errorcode, error_str
+                # _bytes, errorcode, error_str = _download_single_ffmpeg(url)
                 _bytes, errorcode, error_str = _download_single_youtube(url, size=size)
             else:
                 _bytes, errorcode, error_str = _download_single_direct(url)
@@ -202,7 +187,6 @@ def download_generator(
             if errorcode == 0:
                 yield meta, video_bytes, errorcode
             else:
-                logger.debug(f"Error while downloading {meta['<ID>']}: {error}")
                 yield meta, None, errorcode
                 if retry_cnt + 1 < max_retries:
                     submit_job(meta, retry_cnt=retry_cnt + 1)
@@ -293,10 +277,10 @@ def download_shard(
                 try:
                     byte_stream, meta = processor(byte_stream, meta)
                 except Exception as e:
-                    logger.debug("Entering debugging!")
-                    from pudb.remote import set_trace
+                    # logger.debug("Entering debugging!")
+                    # from pudb.remote import set_trace
 
-                    set_trace()
+                    # set_trace()
                     raise ValueError(f"Error while processing {_id}: {e}")
 
                 try:
@@ -309,10 +293,10 @@ def download_shard(
                         for i, (bs, m) in enumerate(zip(byte_stream, meta)):
                             byte_writer.write(key=f"{_id}_SEG_{i}", array=bs, meta=m, fmt="mp4")
                 except Exception as e:
-                    logger.debug("Entering debugging!")
-                    from pudb.remote import set_trace
+                    # logger.debug("Entering debugging!")
+                    # from pudb.remote import set_trace
 
-                    set_trace()
+                    # set_trace()
                     raise ValueError(f"Error while writing {_id}: {e}")
 
             success += 1

@@ -14,9 +14,10 @@ from shutil import rmtree
 
 from .utils import safe_open
 
-from kn_util.utils.system import run_cmd, force_delete_dir
+from kn_util.utils.system import run_cmd, force_delete_dir, is_valid_file
 from kn_util.data.video import save_video_imageio, array_to_video_bytes, save_video_ffmpeg
 from kn_util.utils.io import load_json
+from kn_util.utils.multiproc import map_async_with_thread
 
 
 @dataclass
@@ -81,7 +82,9 @@ class FileWriter:
 
         file_path = osp.join(self.cache_dir, f"{key}.{fmt}")
         json_path = osp.join(self.cache_dir, f"{key}.json")
-        if not (osp.exists(json_path) and osp.getsize(json_path) > 0) or not (osp.exists(file_path) and osp.getsize(file_path) > 0):
+        if not (osp.exists(json_path) and osp.getsize(json_path) > 0) or not (
+            osp.exists(file_path) and osp.getsize(file_path) > 0
+        ):
             run_cmd(f"rm -rf {json_path} {file_path}")
             raise FileNotFoundError(f"File not found: {json_path} or {file_path}")
 
@@ -90,16 +93,16 @@ class FileWriter:
     @property
     def downloaded_ids(self):
         cache_files = set(os.listdir(self.cache_dir))
-        has_video_ids = set([f.split("_SEG_", 1)[0] for f in cache_files if not f.endswith(".json")])
-        has_json_ids = set([f.split("_SEG_", 1)[0] for f in cache_files if f.endswith(".json")])
 
-        downloaded_ids = set()
-        for key in has_video_ids:
-            if key not in has_json_ids:
-                # json file is lost, download it again
-                continue
+        # delete empty files
+        run_cmd(f"cd {self.cache_dir} && fd --type f --size 0k --exec bash -c 'rm -rf {{}}'")
 
-            downloaded_ids.add(key)
+        id_getter = lambda path: path.rsplit(".", 1)[0].rsplit("_SEG_", 1)[0]
+
+        has_video_ids = set([id_getter(file) for file in cache_files if not file.endswith(".json")])
+        has_json_ids = set([id_getter(file) for file in cache_files if file.endswith(".json")])
+
+        downloaded_ids = has_video_ids.intersection(has_json_ids)
 
         return downloaded_ids
 
@@ -144,7 +147,7 @@ class CachedTarWriter(FileWriter):
                 fmt = cache_file.rsplit(".", 1)[1]
                 if fmt in ["mp4"]:
                     item[fmt] = open(osp.join(self.cache_dir, cache_file), "rb").read()
-                if fmt in ["json"]:
+                if fmt == "json":
                     item[fmt] = load_json(osp.join(self.cache_dir, cache_file))
             writer.write(item)
             writer_meta.write({"__key__": cache_id, "json": item["json"]})
